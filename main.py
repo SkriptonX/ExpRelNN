@@ -2,7 +2,7 @@ import sys
 from trainer import train_network
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QComboBox, QSpinBox, QPushButton, QMessageBox,
-                             QDialog, QScrollArea, QFrame)
+                             QDialog, QScrollArea, QFrame, QCheckBox)
 from PyQt5.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -15,7 +15,6 @@ class LayerConfigDialog(QDialog):
         self.setMinimumHeight(300)
         self.layout = QVBoxLayout(self)
 
-        # Управление количеством слоев
         top_layout = QHBoxLayout()
         top_layout.addWidget(QLabel("Количество скрытых слоев:"))
         self.num_layers_sb = QSpinBox()
@@ -25,7 +24,6 @@ class LayerConfigDialog(QDialog):
         top_layout.addWidget(self.num_layers_sb)
         self.layout.addLayout(top_layout)
 
-        # Прокручиваемая область для индивидуальной настройки каждого слоя
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_widget = QWidget()
@@ -55,7 +53,7 @@ class LayerConfigDialog(QDialog):
         current_count = len(self.layer_widgets)
         if count > current_count:
             for _ in range(count - current_count):
-                self.add_layer_widget(8, 'Tanh')  # Значения по умолчанию для новых слоев
+                self.add_layer_widget(8, 'Tanh')
         elif count < current_count:
             for _ in range(current_count - count):
                 widget_data = self.layer_widgets.pop()
@@ -95,7 +93,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Анализ послойной овражности (Метод ЭР)")
         self.resize(1200, 900)
 
-        # Значения по умолчанию
         self.layer_configs = [{'units': 8, 'activation': 'Tanh'}, {'units': 8, 'activation': 'Tanh'}]
         self.run_counter = 1
 
@@ -132,6 +129,25 @@ class MainWindow(QMainWindow):
         self.epochs_sb.setSingleStep(5)
         settings_layout.addWidget(self.epochs_sb)
 
+        self.batching_cb = QCheckBox("Использовать мини-батчи")
+        self.batching_cb.setChecked(False)
+        self.batching_cb.stateChanged.connect(self.toggle_batching)
+        settings_layout.addWidget(self.batching_cb)
+
+        self.batch_label = QLabel("Размер батча:")
+        settings_layout.addWidget(self.batch_label)
+        self.batch_sb = QSpinBox()
+        self.batch_sb.setRange(16, 300)
+        self.batch_sb.setValue(64)
+        self.batch_sb.setSingleStep(16)
+        self.batch_sb.setEnabled(False)
+        settings_layout.addWidget(self.batch_sb)
+
+        self.ema_cb = QCheckBox("Использовать EMA Гессиана")
+        self.ema_cb.setChecked(True)
+        self.ema_cb.setToolTip("Имеет смысл только при включенных мини-батчах")
+        settings_layout.addWidget(self.ema_cb)
+
         settings_layout.addSpacing(20)
 
         self.run_btn = QPushButton("Запустить тест")
@@ -145,7 +161,6 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(settings_panel)
 
-        # === ПРАВАЯ КОЛОНКА: ГРАФИКИ ===
         self.figure = Figure(figsize=(8, 12))
         self.canvas = FigureCanvas(self.figure)
         layout.addWidget(self.canvas)
@@ -154,6 +169,10 @@ class MainWindow(QMainWindow):
         self.ax2 = self.figure.add_subplot(312)
         self.ax3 = self.figure.add_subplot(313)
         self.setup_axes()
+
+    def toggle_batching(self, state):
+        is_enabled = state == Qt.Checked
+        self.batch_sb.setEnabled(is_enabled)
 
     def setup_axes(self):
         self.ax1.set_title("Сходимость: Эпохи / Loss")
@@ -193,13 +212,17 @@ class MainWindow(QMainWindow):
         dataset = self.dataset_cb.currentText()
         optim = self.optim_cb.currentText()
         epochs = self.epochs_sb.value()
+        batch_size = self.batch_sb.value()
+        use_ema = self.ema_cb.isChecked()
+        use_batching = self.batching_cb.isChecked()
 
         self.run_btn.setEnabled(False)
         self.run_btn.setText("Выполнение...")
         QApplication.processEvents()
 
         try:
-            history = train_network(dataset, optim, self.layer_configs, epochs)
+            history = train_network(dataset, optim, self.layer_configs, epochs,
+                                    batch_size, use_ema, use_batching)
             self.plot_results(history, optim)
             self.run_counter += 1
         except Exception as e:
@@ -211,7 +234,6 @@ class MainWindow(QMainWindow):
     def plot_results(self, history, optim):
         label_prefix = f"Тест {self.run_counter} ({optim})"
 
-        # Наложение новых графиков поверх старых
         self.ax1.plot(history['loss'], linewidth=2, label=label_prefix)
         self.ax1.legend(loc='upper right', fontsize=8)
 
