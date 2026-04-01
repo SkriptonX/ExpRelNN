@@ -2,7 +2,7 @@ import sys
 from trainer import train_network
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QComboBox, QSpinBox, QPushButton, QMessageBox,
-                             QDialog, QScrollArea, QFrame, QCheckBox)
+                             QDialog, QScrollArea, QFrame, QCheckBox, QTableWidgetItem, QTableWidget, QHeaderView)
 from PyQt5.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -91,7 +91,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Анализ послойной овражности (Метод ЭР)")
-        self.resize(1200, 900)
+        self.resize(1300, 900)
 
         self.layer_configs = [{'units': 8, 'activation': 'Tanh'}, {'units': 8, 'activation': 'Tanh'}]
         self.run_counter = 1
@@ -100,9 +100,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
         layout = QHBoxLayout(main_widget)
 
-        # === ЛЕВАЯ КОЛОНКА: НАСТРОЙКИ ===
         settings_panel = QWidget()
-        settings_panel.setFixedWidth(280)
+        settings_panel.setFixedWidth(320)
         settings_layout = QVBoxLayout(settings_panel)
         settings_layout.setAlignment(Qt.AlignTop)
 
@@ -117,6 +116,12 @@ class MainWindow(QMainWindow):
         self.optim_cb = QComboBox()
         self.optim_cb.addItems(["ER", "Adam", "SGD"])
         settings_layout.addWidget(self.optim_cb)
+
+        # НОВОЕ: Выбор функции потерь
+        settings_layout.addWidget(QLabel("Целевой функционал (Loss):"))
+        self.loss_cb = QComboBox()
+        self.loss_cb.addItems(["Cross-Entropy", "MSE", "Log Loss"])
+        settings_layout.addWidget(self.loss_cb)
 
         self.arch_btn = QPushButton("Настроить архитектуру сети")
         self.arch_btn.clicked.connect(self.open_arch_dialog)
@@ -145,19 +150,28 @@ class MainWindow(QMainWindow):
 
         self.ema_cb = QCheckBox("Использовать EMA Гессиана")
         self.ema_cb.setChecked(True)
-        self.ema_cb.setToolTip("Имеет смысл только при включенных мини-батчах")
         settings_layout.addWidget(self.ema_cb)
 
-        settings_layout.addSpacing(20)
+        settings_layout.addSpacing(10)
 
         self.run_btn = QPushButton("Запустить тест")
         self.run_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 10px;")
         self.run_btn.clicked.connect(self.run_training)
         settings_layout.addWidget(self.run_btn)
 
-        self.clear_btn = QPushButton("Сбросить графики")
-        self.clear_btn.clicked.connect(self.clear_plots)
+        self.clear_btn = QPushButton("Сбросить графики и таблицу")
+        self.clear_btn.clicked.connect(self.clear_data)
         settings_layout.addWidget(self.clear_btn)
+
+        settings_layout.addSpacing(10)
+        settings_layout.addWidget(QLabel("<b>Результаты:</b>"))
+
+        # НОВОЕ: Таблица результатов
+        self.results_table = QTableWidget(0, 4)
+        self.results_table.setHorizontalHeaderLabels(["Оптим.", "Режим", "Loss", "Время"])
+        self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.results_table.verticalHeader().setVisible(False)
+        settings_layout.addWidget(self.results_table)
 
         layout.addWidget(settings_panel)
 
@@ -171,8 +185,7 @@ class MainWindow(QMainWindow):
         self.setup_axes()
 
     def toggle_batching(self, state):
-        is_enabled = state == Qt.Checked
-        self.batch_sb.setEnabled(is_enabled)
+        self.batch_sb.setEnabled(state == Qt.Checked)
 
     def setup_axes(self):
         self.ax1.set_title("Сходимость: Эпохи / Loss")
@@ -195,13 +208,14 @@ class MainWindow(QMainWindow):
 
         self.figure.tight_layout()
 
-    def clear_plots(self):
+    def clear_data(self):
         self.ax1.clear()
         self.ax2.clear()
         self.ax3.clear()
         self.setup_axes()
         self.canvas.draw()
         self.run_counter = 1
+        self.results_table.setRowCount(0)
 
     def open_arch_dialog(self):
         dialog = LayerConfigDialog(self.layer_configs, self)
@@ -211,6 +225,7 @@ class MainWindow(QMainWindow):
     def run_training(self):
         dataset = self.dataset_cb.currentText()
         optim = self.optim_cb.currentText()
+        loss_name = self.loss_cb.currentText()
         epochs = self.epochs_sb.value()
         batch_size = self.batch_sb.value()
         use_ema = self.ema_cb.isChecked()
@@ -222,8 +237,9 @@ class MainWindow(QMainWindow):
 
         try:
             history = train_network(dataset, optim, self.layer_configs, epochs,
-                                    batch_size, use_ema, use_batching)
+                                    batch_size, use_ema, use_batching, loss_name)
             self.plot_results(history, optim)
+            self.add_table_row(optim, use_batching, use_ema, history['final_loss'], history['total_time'])
             self.run_counter += 1
         except Exception as e:
             QMessageBox.critical(self, "Ошибка выполнения", str(e))
@@ -248,6 +264,19 @@ class MainWindow(QMainWindow):
             self.ax3.legend(loc='upper right', fontsize=8)
 
         self.canvas.draw()
+
+    def add_table_row(self, optim, is_batched, use_ema, final_loss, total_time):
+        row_pos = self.results_table.rowCount()
+        self.results_table.insertRow(row_pos)
+
+        settings_str = "Batched" if is_batched else "Full"
+        if optim == 'ER' and is_batched and use_ema:
+            settings_str += "+EMA"
+
+        self.results_table.setItem(row_pos, 0, QTableWidgetItem(optim))
+        self.results_table.setItem(row_pos, 1, QTableWidgetItem(settings_str))
+        self.results_table.setItem(row_pos, 2, QTableWidgetItem(f"{final_loss:.4f}"))
+        self.results_table.setItem(row_pos, 3, QTableWidgetItem(f"{total_time:.2f}s"))
 
 
 if __name__ == '__main__':
