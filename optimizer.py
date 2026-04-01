@@ -2,12 +2,15 @@ import torch
 
 
 class EROptimizer:
-    def __init__(self, model, h=1.0, init_damping=0.05, step_clip=0.5, use_ema=True, ema_beta=0.9):
+    def __init__(self, model, er_method='Spectral', h=1.0, init_damping=0.05,
+                 step_clip=0.5, use_ema=True, ema_beta=0.9, k_lanczos=10):
         self.model = model
+        self.er_method = er_method
         self.h = h
         self.step_clip = step_clip
         self.use_ema = use_ema
         self.ema_beta = ema_beta
+        self.k_lanczos = k_lanczos
 
         self.state = {
             'hessian_ema': {},
@@ -23,57 +26,142 @@ class EROptimizer:
         condition_numbers = {}
         expected_decrease = 0.0
 
+        current_damping = self.state['damping']
+
         for name, p in self.model.named_parameters():
             if p.grad is None: continue
 
             grad_1d = p.grad.view(-1)
             n = grad_1d.size(0)
-
-            if n > 400:
-                updates[name] = -0.01 * p.grad.detach()
-                condition_numbers[name] = 1.0
-                expected_decrease += (0.01 * torch.sum(p.grad ** 2)).item()
-                continue
-
-            H = []
-            for i in range(n):
-                g2 = torch.autograd.grad(grad_1d[i], p, retain_graph=True)[0]
-                H.append(g2.view(-1))
-
-
-            H = torch.stack(H).detach()
-            H = 0.5 * (H + H.T)
-
-            if self.use_ema:
-                if name not in self.state['hessian_ema']:
-                    self.state['hessian_ema'][name] = H
-                else:
-                    self.state['hessian_ema'][name] = (
-                            self.ema_beta * self.state['hessian_ema'][name] +
-                            (1 - self.ema_beta) * H
-                    )
-                H_eff = self.state['hessian_ema'][name]
-            else:
-                H_eff = H
-
-            L, V = torch.linalg.eigh(H_eff)
-
-            lam_max = torch.max(torch.abs(L)).item()
-            lam_min = torch.min(torch.abs(L)).item()
-            condition_numbers[name] = lam_max / (lam_min + 1e-8)
-
-            diag = torch.zeros_like(L)
-            current_damping = self.state['damping']
-
-            for i, lam in enumerate(L):
-                abs_lam = torch.abs(lam) + current_damping
-                arg = -self.h * abs_lam
-                diag[i] = (1.0 - torch.exp(arg)) / abs_lam
-
-            H_inv_er = V @ torch.diag(diag) @ V.T
-
             g_val = grad_1d.detach()
-            step = H_inv_er @ g_val
+
+            if self.er_method == 'Lanczos':
+                def calc_hv(v):
+                    gv = torch.dot(grad_1d, v)
+                    hv = torch.autograd.grad(gv, p, retain_graph=True)[0].view(-1)
+                    return hv.detach()
+
+                k = min(self.k_lanczos, n)
+                Q = torch.zeros((n, k), device=p.device)
+                alphas = torch.zeros(k, device=p.device)
+                betas = torch.zeros(k, device=p.device)
+
+                g_norm = torch.norm(g_val)
+                if g_norm < 1e-8:
+                    updates[name] = torch.zeros_like(p)
+                    continue
+
+                v = g_val / g_norm
+                Q[:, 0] = v
+                v_prev = torch.zeros_like(v)
+                beta = 0.0
+
+                for j in range(k):
+                    w = calc_hv(Q[:, j])
+                    w = w - beta * v_prev
+
+                    alpha = torch.dot(w, Q[:, j])
+                    alphas[j] = alpha
+                    w = w - alpha * Q[:, j]
+
+                    for i in range(j + 1):
+                        w = w - torch.dot(w, Q[:, i]) * Q[:, i]
+
+                    beta = torch.norm(w)
+                    if j < k - 1:
+                        betas[j] = beta
+                        if beta > 1e-8:
+                            Q[:, j + 1] = w / beta
+                            v_prev = Q[:, j]
+                        else:
+                            k = j + 1
+                            break
+
+                T = torch.diag(alphas[:k]) + torch.diag(betas[:k - 1], 1) + torch.diag(betas[:k - 1], -1)
+
+                L, V = torch.linalg.eigh(T)
+                lam_max = torch.max(torch.abs(L)).item()
+                lam_min = torch.min(torch.abs(L)).item()
+                condition_numbers[name] = lam_max / (lam_min + 1e-8)
+
+                diag = torch.zeros_like(L)
+                for i, lam in enumerate(L):
+                    abs_lam = torch.abs(lam) + current_damping
+                    arg = -self.h * abs_lam
+                    diag[i] = (1.0 - torch.exp(arg)) / abs_lam
+
+                f_T = V @ torch.diag(diag) @ V.T
+                e1 = torch.zeros(k, device=p.device)
+                e1[0] = g_norm
+                y_step = f_T @ e1
+                step = Q[:, :k] @ y_step
+
+                H_eff = None
+
+            else:
+                if n > 400:
+                    updates[name] = -0.01 * g_val
+                    condition_numbers[name] = 1.0
+                    expected_decrease += (0.01 * torch.sum(g_val ** 2)).item()
+                    continue
+
+                H = []
+                for i in range(n):
+                    g2 = torch.autograd.grad(grad_1d[i], p, retain_graph=True)[0]
+                    H.append(g2.view(-1))
+
+                H = torch.stack(H).detach()
+                H = 0.5 * (H + H.T)
+
+                if self.use_ema:
+                    if name not in self.state['hessian_ema']:
+                        self.state['hessian_ema'][name] = H
+                    else:
+                        self.state['hessian_ema'][name] = (
+                                self.ema_beta * self.state['hessian_ema'][name] +
+                                (1 - self.ema_beta) * H
+                        )
+                    H_eff = self.state['hessian_ema'][name]
+                else:
+                    H_eff = H
+
+                if self.er_method == 'Spectral':
+                    L, V = torch.linalg.eigh(H_eff)
+                    lam_max = torch.max(torch.abs(L)).item()
+                    lam_min = torch.min(torch.abs(L)).item()
+                    condition_numbers[name] = lam_max / (lam_min + 1e-8)
+
+                    diag = torch.zeros_like(L)
+                    for i, lam in enumerate(L):
+                        abs_lam = torch.abs(lam) + current_damping
+                        arg = -self.h * abs_lam
+                        diag[i] = (1.0 - torch.exp(arg)) / abs_lam
+
+                    H_inv_er = V @ torch.diag(diag) @ V.T
+                    step = H_inv_er @ g_val
+
+                elif self.er_method == 'Recursive':
+                    G = H_eff.detach()
+                    G = G + (current_damping + 1e-4) * torch.eye(n, device=p.device)
+
+                    norm_G = torch.linalg.matrix_norm(G, ord='fro')
+                    m = int(torch.ceil(torch.log2(norm_G * self.h / 0.5)).item())
+                    m = max(0, m)
+
+                    A = (G * self.h) / (2 ** m)
+
+                    # Phi(A) = I - A/2 + A^2/6
+                    identity = torch.eye(n, device=p.device)
+                    Phi = identity - 0.5 * A + (1 / 6.0) * torch.matmul(A, A)
+                    ExpA = identity - torch.matmul(A, Phi)
+
+                    for _ in range(m):
+                        Phi = 0.5 * torch.matmul(Phi, (identity + ExpA))
+                        ExpA = torch.matmul(ExpA, ExpA)
+
+                    step = self.h * (Phi @ g_val)
+
+                    condition_numbers[name] = norm_G.item() / (current_damping + 1e-8)
 
             step_norm = torch.norm(step)
             if step_norm > self.step_clip:
@@ -82,8 +170,11 @@ class EROptimizer:
             dw = -step
             updates[name] = dw.view(p.size())
 
-            dec = -(torch.dot(g_val, dw) + 0.5 * torch.dot(dw, H_eff @ dw))
-            expected_decrease += dec.item()
+            if self.er_method != 'Lanczos' and H_eff is not None:
+                dec = -(torch.dot(g_val, dw) + 0.5 * torch.dot(dw, H_eff @ dw))
+                expected_decrease += dec.item()
+            else:
+                expected_decrease += (torch.dot(g_val, -dw)).item()
 
         with torch.no_grad():
             for name, p in self.model.named_parameters():

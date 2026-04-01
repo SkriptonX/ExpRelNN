@@ -6,7 +6,8 @@ from model import FlexibleNN, get_dataset
 from optimizer import EROptimizer
 
 
-def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size, use_ema, use_batching, loss_name):
+def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
+                  use_ema, use_batching, loss_name, er_method='Spectral', k_lanczos=10):
     X, y = get_dataset(dataset_name)
 
     if loss_name == 'Cross-Entropy':
@@ -40,8 +41,9 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size, u
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
     else:
         start_damping = 0.05 if use_batching else 1e-4
-        optimizer = EROptimizer(model, h=1.0, init_damping=start_damping,
-                                step_clip=0.5, use_ema=use_ema, ema_beta=0.9)
+        optimizer = EROptimizer(model, er_method=er_method, h=1.0,
+                                init_damping=start_damping, step_clip=1.0,
+                                use_ema=use_ema, ema_beta=0.9, k_lanczos=k_lanczos)
 
     history = {'loss': [], 'time': [], 'cond': {}}
     start_time = time.time()

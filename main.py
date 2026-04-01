@@ -117,7 +117,20 @@ class MainWindow(QMainWindow):
         self.optim_cb.addItems(["ER", "Adam", "SGD"])
         settings_layout.addWidget(self.optim_cb)
 
-        # НОВОЕ: Выбор функции потерь
+        self.er_method_label = QLabel("Метод ER:")
+        settings_layout.addWidget(self.er_method_label)
+        self.er_method_cb = QComboBox()
+        self.er_method_cb.addItems(["Spectral", "Recursive", "Lanczos"])
+        self.er_method_cb.currentTextChanged.connect(self.toggle_lanczos_settings)
+        settings_layout.addWidget(self.er_method_cb)
+
+        self.k_lanczos_label = QLabel("Размер подпространства (Lanczos k):")
+        settings_layout.addWidget(self.k_lanczos_label)
+        self.k_lanczos_sb = QSpinBox()
+        self.k_lanczos_sb.setRange(2, 50)
+        self.k_lanczos_sb.setValue(10)
+        settings_layout.addWidget(self.k_lanczos_sb)
+
         settings_layout.addWidget(QLabel("Целевой функционал (Loss):"))
         self.loss_cb = QComboBox()
         self.loss_cb.addItems(["Cross-Entropy", "MSE", "Log Loss"])
@@ -187,6 +200,18 @@ class MainWindow(QMainWindow):
     def toggle_batching(self, state):
         self.batch_sb.setEnabled(state == Qt.Checked)
 
+    def toggle_er_settings(self, text):
+        is_er = (text == "ER")
+        self.er_method_label.setVisible(is_er)
+        self.er_method_cb.setVisible(is_er)
+        self.toggle_lanczos_settings(self.er_method_cb.currentText() if is_er else "")
+        self.ema_cb.setEnabled(is_er)
+
+    def toggle_lanczos_settings(self, text):
+        is_lanczos = (text == "Lanczos" and self.optim_cb.currentText() == "ER")
+        self.k_lanczos_label.setVisible(is_lanczos)
+        self.k_lanczos_sb.setVisible(is_lanczos)
+
     def setup_axes(self):
         self.ax1.set_title("Сходимость: Эпохи / Loss")
         self.ax1.set_xlabel("Эпоха")
@@ -230,6 +255,8 @@ class MainWindow(QMainWindow):
         batch_size = self.batch_sb.value()
         use_ema = self.ema_cb.isChecked()
         use_batching = self.batching_cb.isChecked()
+        er_method = self.er_method_cb.currentText()
+        k_lanczos = self.k_lanczos_sb.value()
 
         self.run_btn.setEnabled(False)
         self.run_btn.setText("Выполнение...")
@@ -237,7 +264,8 @@ class MainWindow(QMainWindow):
 
         try:
             history = train_network(dataset, optim, self.layer_configs, epochs,
-                                    batch_size, use_ema, use_batching, loss_name)
+                                    batch_size, use_ema, use_batching, loss_name,
+                                    er_method, k_lanczos)
             self.plot_results(history, optim)
             self.add_table_row(optim, use_batching, use_ema, history['final_loss'], history['total_time'])
             self.run_counter += 1
