@@ -114,14 +114,15 @@ class MainWindow(QMainWindow):
 
         settings_layout.addWidget(QLabel("Оптимизатор:"))
         self.optim_cb = QComboBox()
-        self.optim_cb.addItems(["ER", "Adam", "SGD"])
+        self.optim_cb.addItems(["ER", "Adam", "SGD", "Hybrid"])
+        self.optim_cb.currentTextChanged.connect(self.toggle_optim_settings)
         settings_layout.addWidget(self.optim_cb)
 
         self.er_method_label = QLabel("Метод ER:")
         settings_layout.addWidget(self.er_method_label)
         self.er_method_cb = QComboBox()
         self.er_method_cb.addItems(["Spectral", "Recursive", "Lanczos"])
-        self.er_method_cb.currentTextChanged.connect(self.toggle_lanczos_settings)
+        self.er_method_cb.currentTextChanged.connect(self.toggle_optim_settings)
         settings_layout.addWidget(self.er_method_cb)
 
         self.k_lanczos_label = QLabel("Размер подпространства (Lanczos k):")
@@ -130,6 +131,21 @@ class MainWindow(QMainWindow):
         self.k_lanczos_sb.setRange(2, 50)
         self.k_lanczos_sb.setValue(10)
         settings_layout.addWidget(self.k_lanczos_sb)
+
+        self.switch_label = QLabel("Условие переключения:")
+        settings_layout.addWidget(self.switch_label)
+        self.switch_cb = QComboBox()
+        self.switch_cb.addItems(["Стагнация (Stagnation)", "Спектральный (Cost-Benefit)", "Фиксированная эпоха"])
+        self.switch_cb.currentTextChanged.connect(self.toggle_optim_settings)
+        settings_layout.addWidget(self.switch_cb)
+
+        self.switch_epoch_label = QLabel("Эпоха переключения:")
+        settings_layout.addWidget(self.switch_epoch_label)
+        self.switch_epoch_sb = QSpinBox()
+        self.switch_epoch_sb.setRange(1, 1000)
+        self.switch_epoch_sb.setValue(15)
+        settings_layout.addWidget(self.switch_epoch_sb)
+
 
         settings_layout.addWidget(QLabel("Целевой функционал (Loss):"))
         self.loss_cb = QComboBox()
@@ -179,7 +195,8 @@ class MainWindow(QMainWindow):
         settings_layout.addSpacing(10)
         settings_layout.addWidget(QLabel("<b>Результаты:</b>"))
 
-        # НОВОЕ: Таблица результатов
+        self.toggle_optim_settings(self.optim_cb.currentText())
+
         self.results_table = QTableWidget(0, 4)
         self.results_table.setHorizontalHeaderLabels(["Оптим.", "Режим", "Loss", "Время"])
         self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -199,6 +216,24 @@ class MainWindow(QMainWindow):
 
     def toggle_batching(self, state):
         self.batch_sb.setEnabled(state == Qt.Checked)
+
+    def toggle_optim_settings(self, text=None):
+        optim = self.optim_cb.currentText()
+        is_er_or_hybrid = optim in ["ER", "Hybrid"]
+        is_hybrid = optim == "Hybrid"
+        is_lanczos = self.er_method_cb.currentText() == "Lanczos"
+        is_fixed = self.switch_cb.currentText() == "Фиксированная эпоха"
+
+        self.er_method_label.setVisible(is_er_or_hybrid)
+        self.er_method_cb.setVisible(is_er_or_hybrid)
+        self.k_lanczos_label.setVisible(is_er_or_hybrid and is_lanczos)
+        self.k_lanczos_sb.setVisible(is_er_or_hybrid and is_lanczos)
+        self.ema_cb.setEnabled(is_er_or_hybrid)
+
+        self.switch_label.setVisible(is_hybrid)
+        self.switch_cb.setVisible(is_hybrid)
+        self.switch_epoch_label.setVisible(is_hybrid and is_fixed)
+        self.switch_epoch_sb.setVisible(is_hybrid and is_fixed)
 
     def toggle_er_settings(self, text):
         is_er = (text == "ER")
@@ -258,6 +293,9 @@ class MainWindow(QMainWindow):
         er_method = self.er_method_cb.currentText()
         k_lanczos = self.k_lanczos_sb.value()
 
+        switch_method = self.switch_cb.currentText()
+        switch_epoch = self.switch_epoch_sb.value()
+
         self.run_btn.setEnabled(False)
         self.run_btn.setText("Выполнение...")
         QApplication.processEvents()
@@ -265,9 +303,10 @@ class MainWindow(QMainWindow):
         try:
             history = train_network(dataset, optim, self.layer_configs, epochs,
                                     batch_size, use_ema, use_batching, loss_name,
-                                    er_method, k_lanczos)
+                                    er_method, k_lanczos, switch_method, switch_epoch)
             self.plot_results(history, optim)
-            self.add_table_row(optim, use_batching, use_ema, history['final_loss'], history['total_time'])
+            self.add_table_row(optim, use_batching, use_ema, history['final_loss'],
+                               history['total_time'], history.get('switch_epoch', -1))
             self.run_counter += 1
         except Exception as e:
             QMessageBox.critical(self, "Ошибка выполнения", str(e))
@@ -279,32 +318,45 @@ class MainWindow(QMainWindow):
         label_prefix = f"Тест {self.run_counter} ({optim})"
 
         self.ax1.plot(history['loss'], linewidth=2, label=label_prefix)
+        switch_ep = history.get('switch_epoch', -1)
+        if switch_ep != -1:
+            self.ax1.axvline(x=switch_ep, color='cyan', linestyle=':', linewidth=1.5)
+            self.ax1.text(switch_ep, history['loss'][switch_ep], ' Switched to ER', color='cyan', fontsize=8)
+
         self.ax1.legend(loc='upper right', fontsize=8)
 
         self.ax2.plot(history['time'], history['loss'], linewidth=2, label=label_prefix)
         self.ax2.legend(loc='upper right', fontsize=8)
 
-        if optim == 'ER' and history['cond']:
+        if (optim == 'ER' or optim == 'Hybrid') and history['cond']:
             for layer_name, conds in history['cond'].items():
                 if 'weight' in layer_name:
                     layer_label = layer_name.replace('.weight', '')
-                    self.ax3.plot(conds, label=f"{label_prefix} - {layer_label}")
+                    x_axis = range(switch_ep, switch_ep + len(conds)) if switch_ep != -1 else range(len(conds))
+                    self.ax3.plot(x_axis, conds, label=f"{label_prefix} - {layer_label}")
             self.ax3.legend(loc='upper right', fontsize=8)
 
         self.canvas.draw()
 
-    def add_table_row(self, optim, is_batched, use_ema, final_loss, total_time):
+    def add_table_row(self, optim, is_batched, use_ema, final_loss, total_time, switch_ep):
+        # self.results_table = QTableWidget(0, 5)
+        # self.results_table.setHorizontalHeaderLabels(["Оптим.", "Режим", "Loss", "Время", "Смена"])
         row_pos = self.results_table.rowCount()
         self.results_table.insertRow(row_pos)
 
         settings_str = "Batched" if is_batched else "Full"
-        if optim == 'ER' and is_batched and use_ema:
+        if optim in ['ER', 'Hybrid'] and is_batched and use_ema:
             settings_str += "+EMA"
+
+        switch_str = f"Эпоха {switch_ep}" if switch_ep != -1 else "-"
 
         self.results_table.setItem(row_pos, 0, QTableWidgetItem(optim))
         self.results_table.setItem(row_pos, 1, QTableWidgetItem(settings_str))
-        self.results_table.setItem(row_pos, 2, QTableWidgetItem(f"{final_loss:.4f}"))
+        self.results_table.setItem(row_pos, 2, QTableWidgetItem(f"{final_loss:.4e}"))
         self.results_table.setItem(row_pos, 3, QTableWidgetItem(f"{total_time:.2f}s"))
+
+        if self.results_table.columnCount() > 4:
+            self.results_table.setItem(row_pos, 4, QTableWidgetItem(switch_str))
 
 
 if __name__ == '__main__':
