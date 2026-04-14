@@ -209,9 +209,10 @@ class MainWindow(QMainWindow):
         self.canvas = FigureCanvas(self.figure)
         layout.addWidget(self.canvas)
 
-        self.ax1 = self.figure.add_subplot(311)
-        self.ax2 = self.figure.add_subplot(312)
-        self.ax3 = self.figure.add_subplot(313)
+        self.ax1 = self.figure.add_subplot(411)
+        self.ax2 = self.figure.add_subplot(412)
+        self.ax3 = self.figure.add_subplot(413)
+        self.ax4 = self.figure.add_subplot(414)
         self.setup_axes()
 
     def toggle_batching(self, state):
@@ -266,12 +267,19 @@ class MainWindow(QMainWindow):
         self.ax3.set_yscale('log')
         self.ax3.grid(True, linestyle='--', alpha=0.7)
 
+        self.ax4.set_title("Обусловленность матриц весов (SVD)")
+        self.ax4.set_xlabel("Эпоха")
+        self.ax4.set_ylabel("Condition Number")
+        self.ax4.set_yscale('log')
+        self.ax4.grid(True, linestyle='--', alpha=0.7)
+
         self.figure.tight_layout()
 
     def clear_data(self):
         self.ax1.clear()
         self.ax2.clear()
         self.ax3.clear()
+        self.ax4.clear()
         self.setup_axes()
         self.canvas.draw()
         self.run_counter = 1
@@ -322,7 +330,6 @@ class MainWindow(QMainWindow):
         if switch_ep != -1:
             self.ax1.axvline(x=switch_ep, color='cyan', linestyle=':', linewidth=1.5)
             self.ax1.text(switch_ep, history['loss'][switch_ep], ' Switched to ER', color='cyan', fontsize=8)
-
         self.ax1.legend(loc='upper right', fontsize=8)
 
         self.ax2.plot(history['time'], history['loss'], linewidth=2, label=label_prefix)
@@ -335,6 +342,12 @@ class MainWindow(QMainWindow):
                     x_axis = range(switch_ep, switch_ep + len(conds)) if switch_ep != -1 else range(len(conds))
                     self.ax3.plot(x_axis, conds, label=f"{label_prefix} - {layer_label}")
             self.ax3.legend(loc='upper right', fontsize=8)
+
+        if history.get('weight_cond'):
+            for layer_name, conds in history['weight_cond'].items():
+                layer_label = layer_name.replace('.weight', '')
+                self.ax4.plot(conds, label=f"{label_prefix} - {layer_label}")
+            self.ax4.legend(loc='upper right', fontsize=8)
 
         self.canvas.draw()
 

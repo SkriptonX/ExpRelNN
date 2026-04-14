@@ -12,7 +12,6 @@ def check_spectral_cost_benefit(model, loss_fn, X, y):
     loss.backward(create_graph=True)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
     target_layer = None
     max_size = 0
     for name, p in model.named_parameters():
@@ -39,7 +38,6 @@ def check_spectral_cost_benefit(model, loss_fn, X, y):
 
     cost_adam = kappa
     cost_er = 15 * total_params
-
     return cost_adam > cost_er * 2.0
 
 
@@ -83,16 +81,14 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
                                 init_damping=start_damping, step_clip=1.0,
                                 use_ema=use_ema, ema_beta=0.9, k_lanczos=k_lanczos)
 
-    history = {'loss': [], 'time': [], 'cond': {}}
+    history = {'loss': [], 'time': [], 'cond': {}, 'weight_cond': {}}
     start_time = time.time()
 
     for epoch in range(epochs):
         if is_hybrid and not switched_to_er and epoch >= 5:
             do_switch = False
-
             if switch_method == 'Фиксированная эпоха':
-                if epoch >= switch_epoch:
-                    do_switch = True
+                if epoch >= switch_epoch: do_switch = True
             else:
                 loss_diff = history['loss'][-5] - history['loss'][-1]
                 if loss_diff < 1e-3:
@@ -114,6 +110,7 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
 
         epoch_loss = 0.0
         epoch_conds = {}
+        epoch_weight_conds = {}
         batches = 0
 
         for bx, by in loader:
@@ -137,12 +134,28 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
                     epoch_conds[k] = []
                 epoch_conds[k].append(v)
 
+            with torch.no_grad():
+                for name, p in model.named_parameters():
+                    if 'weight' in name and p.dim() == 2:
+                        s = torch.linalg.svdvals(p)
+                        s_max = torch.max(s).item()
+                        s_min = torch.min(s).item()
+                        kappa_w = s_max / (s_min + 1e-12)
+
+                        if name not in epoch_weight_conds:
+                            epoch_weight_conds[name] = []
+                        epoch_weight_conds[name].append(kappa_w)
+
         history['loss'].append(epoch_loss / batches)
         history['time'].append(time.time() - start_time)
 
         for k, v in epoch_conds.items():
             if k not in history['cond']: history['cond'][k] = []
             history['cond'][k].append(sum(v) / len(v))
+
+        for k, v in epoch_weight_conds.items():
+            if k not in history['weight_cond']: history['weight_cond'][k] = []
+            history['weight_cond'][k].append(sum(v) / len(v))
 
     history['final_loss'] = history['loss'][-1]
     history['total_time'] = history['time'][-1]
