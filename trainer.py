@@ -8,6 +8,31 @@ from model import FlexibleNN, get_dataset
 from optimizer import EROptimizer
 
 
+def get_memory_footprint_mb(model, optimizer):
+    mem_bytes = 0
+    for p in model.parameters():
+        mem_bytes += p.nelement() * p.element_size()
+        if p.grad is not None:
+            mem_bytes += p.grad.nelement() * p.grad.element_size()
+
+    if hasattr(optimizer, 'state'):
+        for state_dict in optimizer.state.values():
+            if isinstance(state_dict, dict):
+                for v in state_dict.values():
+                    if torch.is_tensor(v):
+                        mem_bytes += v.nelement() * v.element_size()
+
+        if 'hessian_ema' in optimizer.state:
+            for v in optimizer.state['hessian_ema'].values():
+                if v.layout == torch.sparse_csr:
+                    mem_bytes += v.values().nelement() * v.values().element_size()
+                    mem_bytes += v.crow_indices().nelement() * v.crow_indices().element_size()
+                    mem_bytes += v.col_indices().nelement() * v.col_indices().element_size()
+                else:
+                    mem_bytes += v.nelement() * v.element_size()
+
+    return mem_bytes / (1024 * 1024)
+
 def check_spectral_cost_benefit(model, loss_fn, X, y):
     loss = loss_fn(model(X), y)
     model.zero_grad()
@@ -45,7 +70,7 @@ def check_spectral_cost_benefit(model, loss_fn, X, y):
 
 def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
                   use_ema, use_batching, loss_name, er_method='Spectral', k_lanczos=10,
-                  switch_method='Стагнация', switch_epoch=10, seed=42):
+                  switch_method='Стагнация', switch_epoch=10, seed=42, use_compression=False):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -90,7 +115,8 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
         start_damping = 0.05 if use_batching else 1e-4
         optimizer = EROptimizer(model, er_method=er_method, h=1.0,
                                 init_damping=start_damping, step_clip=1.0,
-                                use_ema=use_ema, ema_beta=0.9, k_lanczos=k_lanczos)
+                                use_ema=use_ema, ema_beta=0.9, k_lanczos=k_lanczos,
+                                use_compression=use_compression)
 
     history = {'loss': [], 'time': [], 'cond': {}, 'weight_cond': {}}
     start_time = time.time()
@@ -113,7 +139,8 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
                 start_damping = 0.05 if use_batching else 1e-4
                 optimizer = EROptimizer(model, er_method=er_method, h=1.0,
                                         init_damping=start_damping, step_clip=1.0,
-                                        use_ema=use_ema, ema_beta=0.9, k_lanczos=k_lanczos)
+                                        use_ema=use_ema, ema_beta=0.9, k_lanczos=k_lanczos,
+                                        use_compression=use_compression)
                 active_optim_name = 'ER'
                 switched_to_er = True
                 switch_epoch_record = epoch
@@ -170,5 +197,7 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
     history['total_time'] = history['time'][-1]
     history['switch_epoch'] = switch_epoch_record
     history['seed'] = seed
+
+    history['memory_mb'] = get_memory_footprint_mb(model, optimizer)
 
     return history

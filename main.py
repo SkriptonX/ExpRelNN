@@ -201,6 +201,11 @@ class MainWindow(QMainWindow):
         self.ema_cb.setChecked(True)
         settings_layout.addWidget(self.ema_cb)
 
+        self.compress_cb = QCheckBox("Сжатие памяти (CSR Pruning)")
+        self.compress_cb.setChecked(False)
+        self.compress_cb.setToolTip("Упаковывает матрицы Гессе в разреженный формат CSR (как в Adam)")
+        settings_layout.addWidget(self.compress_cb)
+
         settings_layout.addSpacing(10)
 
         self.run_btn = QPushButton("Запустить тест")
@@ -217,8 +222,8 @@ class MainWindow(QMainWindow):
 
         self.toggle_optim_settings(self.optim_cb.currentText())
 
-        self.results_table = QTableWidget(0, 6)
-        self.results_table.setHorizontalHeaderLabels(["Оптим.", "Режим", "Loss", "Время", "Смена", "Seed"])
+        self.results_table = QTableWidget(0, 7)
+        self.results_table.setHorizontalHeaderLabels(["Оптим.", "Режим", "Loss", "Время", "Смена", "Seed", "Память"])
         self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.results_table.verticalHeader().setVisible(False)
         settings_layout.addWidget(self.results_table)
@@ -250,7 +255,7 @@ class MainWindow(QMainWindow):
         self.k_lanczos_label.setVisible(is_er_or_hybrid and is_lanczos)
         self.k_lanczos_sb.setVisible(is_er_or_hybrid and is_lanczos)
         self.ema_cb.setEnabled(is_er_or_hybrid)
-
+        self.compress_cb.setEnabled(is_er_or_hybrid and not is_lanczos)
         self.switch_label.setVisible(is_hybrid)
         self.switch_cb.setVisible(is_hybrid)
         self.switch_epoch_label.setVisible(is_hybrid and is_fixed)
@@ -322,6 +327,7 @@ class MainWindow(QMainWindow):
         k_lanczos = self.k_lanczos_sb.value()
         switch_method = self.switch_cb.currentText()
         switch_epoch = self.switch_epoch_sb.value()
+        use_compression = self.compress_cb.isChecked()
 
         if self.seed_auto_cb.isChecked():
             current_seed = random.randint(0, 99999999)
@@ -336,10 +342,12 @@ class MainWindow(QMainWindow):
         try:
             history = train_network(dataset, optim, self.layer_configs, epochs,
                                     batch_size, use_ema, use_batching, loss_name,
-                                    er_method, k_lanczos, switch_method, switch_epoch, current_seed)
+                                    er_method, k_lanczos, switch_method, switch_epoch,
+                                    current_seed, use_compression)
             self.plot_results(history, optim, current_seed)
             self.add_table_row(optim, use_batching, use_ema, history['final_loss'],
-                               history['total_time'], history.get('switch_epoch', -1), current_seed)
+                               history['total_time'], history.get('switch_epoch', -1),
+                               current_seed, history['memory_mb'])
             self.run_counter += 1
         except Exception as e:
             QMessageBox.critical(self, "Ошибка выполнения", str(e))
@@ -375,7 +383,7 @@ class MainWindow(QMainWindow):
 
         self.canvas.draw()
 
-    def add_table_row(self, optim, is_batched, use_ema, final_loss, total_time, switch_ep, seed_val):
+    def add_table_row(self, optim, is_batched, use_ema, final_loss, total_time, switch_ep, seed_val, mem_mb):
         row_pos = self.results_table.rowCount()
         self.results_table.insertRow(row_pos)
 
@@ -391,6 +399,7 @@ class MainWindow(QMainWindow):
         self.results_table.setItem(row_pos, 3, QTableWidgetItem(f"{total_time:.2f}s"))
         self.results_table.setItem(row_pos, 4, QTableWidgetItem(switch_str))
         self.results_table.setItem(row_pos, 5, QTableWidgetItem(str(seed_val)))
+        self.results_table.setItem(row_pos, 6, QTableWidgetItem(f"{mem_mb:.2f} MB"))
 
 
 if __name__ == '__main__':

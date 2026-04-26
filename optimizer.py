@@ -3,7 +3,8 @@ import torch
 
 class EROptimizer:
     def __init__(self, model, er_method='Spectral', h=1.0, init_damping=0.05,
-                 step_clip=0.5, use_ema=True, ema_beta=0.9, k_lanczos=10):
+                 step_clip=1.0, use_ema=True, ema_beta=0.9, k_lanczos=10,
+                 use_compression=False, compression_threshold=1e-4):
         self.model = model
         self.er_method = er_method
         self.h = h
@@ -11,6 +12,9 @@ class EROptimizer:
         self.use_ema = use_ema
         self.ema_beta = ema_beta
         self.k_lanczos = k_lanczos
+
+        self.use_compression = use_compression
+        self.compression_threshold = compression_threshold
 
         self.state = {
             'hessian_ema': {},
@@ -25,7 +29,6 @@ class EROptimizer:
         updates = {}
         condition_numbers = {}
         expected_decrease = 0.0
-
         current_damping = self.state['damping']
 
         for name, p in self.model.named_parameters():
@@ -59,7 +62,6 @@ class EROptimizer:
                 for j in range(k):
                     w = calc_hv(Q[:, j])
                     w = w - beta * v_prev
-
                     alpha = torch.dot(w, Q[:, j])
                     alphas[j] = alpha
                     w = w - alpha * Q[:, j]
@@ -78,7 +80,6 @@ class EROptimizer:
                             break
 
                 T = torch.diag(alphas[:k]) + torch.diag(betas[:k - 1], 1) + torch.diag(betas[:k - 1], -1)
-
                 L, V = torch.linalg.eigh(T)
                 lam_max = torch.max(torch.abs(L)).item()
                 lam_min = torch.min(torch.abs(L)).item()
@@ -95,7 +96,6 @@ class EROptimizer:
                 e1[0] = g_norm
                 y_step = f_T @ e1
                 step = Q[:, :k] @ y_step
-
                 H_eff = None
 
             else:
@@ -115,13 +115,23 @@ class EROptimizer:
 
                 if self.use_ema:
                     if name not in self.state['hessian_ema']:
-                        self.state['hessian_ema'][name] = H
+                        H_new = H
                     else:
-                        self.state['hessian_ema'][name] = (
-                                self.ema_beta * self.state['hessian_ema'][name] +
-                                (1 - self.ema_beta) * H
-                        )
+                        H_old = self.state['hessian_ema'][name]
+                        if H_old.layout == torch.sparse_csr:
+                            H_old = H_old.to_dense()
+                        H_new = self.ema_beta * H_old + (1 - self.ema_beta) * H
+
+                    if self.use_compression:
+                        mask = torch.abs(H_new) > self.compression_threshold
+                        H_pruned = H_new * mask
+                        self.state['hessian_ema'][name] = H_pruned.to_sparse_csr()
+                    else:
+                        self.state['hessian_ema'][name] = H_new
+
                     H_eff = self.state['hessian_ema'][name]
+                    if H_eff.layout == torch.sparse_csr:
+                        H_eff = H_eff.to_dense()
                 else:
                     H_eff = H
 
@@ -143,14 +153,11 @@ class EROptimizer:
                 elif self.er_method == 'Recursive':
                     G = H_eff.detach()
                     G = G + (current_damping + 1e-4) * torch.eye(n, device=p.device)
-
                     norm_G = torch.linalg.matrix_norm(G, ord='fro')
                     m = int(torch.ceil(torch.log2(norm_G * self.h / 0.5)).item())
                     m = max(0, m)
 
                     A = (G * self.h) / (2 ** m)
-
-                    # Phi(A) = I - A/2 + A^2/6
                     identity = torch.eye(n, device=p.device)
                     Phi = identity - 0.5 * A + (1 / 6.0) * torch.matmul(A, A)
                     ExpA = identity - torch.matmul(A, Phi)
@@ -160,7 +167,6 @@ class EROptimizer:
                         ExpA = torch.matmul(ExpA, ExpA)
 
                     step = self.h * (Phi @ g_val)
-
                     condition_numbers[name] = norm_G.item() / (current_damping + 1e-8)
 
             step_norm = torch.norm(step)
