@@ -1,4 +1,5 @@
 import sys
+import random
 from trainer import train_network
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QComboBox, QSpinBox, QPushButton, QMessageBox,
@@ -176,6 +177,25 @@ class MainWindow(QMainWindow):
         self.batch_sb.setSingleStep(16)
         self.batch_sb.setEnabled(False)
         settings_layout.addWidget(self.batch_sb)
+        settings_layout.addSpacing(10)
+        settings_layout.addWidget(QLabel("<b>Воспроизводимость</b>"))
+
+        seed_layout = QHBoxLayout()
+        seed_layout.addWidget(QLabel("Seed:"))
+
+        self.seed_sb = QSpinBox()
+        self.seed_sb.setRange(0, 99999999)
+        self.seed_sb.setValue(random.randint(0, 99999999))
+        self.seed_sb.setEnabled(False)
+        seed_layout.addWidget(self.seed_sb)
+
+        self.seed_auto_cb = QCheckBox("Авто")
+        self.seed_auto_cb.setChecked(True)
+        self.seed_auto_cb.toggled.connect(lambda checked: self.seed_sb.setEnabled(not checked))
+        seed_layout.addWidget(self.seed_auto_cb)
+        settings_layout.addLayout(seed_layout)
+        settings_layout.addSpacing(10)
+
 
         self.ema_cb = QCheckBox("Использовать EMA Гессиана")
         self.ema_cb.setChecked(True)
@@ -197,8 +217,8 @@ class MainWindow(QMainWindow):
 
         self.toggle_optim_settings(self.optim_cb.currentText())
 
-        self.results_table = QTableWidget(0, 4)
-        self.results_table.setHorizontalHeaderLabels(["Оптим.", "Режим", "Loss", "Время"])
+        self.results_table = QTableWidget(0, 6)
+        self.results_table.setHorizontalHeaderLabels(["Оптим.", "Режим", "Loss", "Время", "Смена", "Seed"])
         self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.results_table.verticalHeader().setVisible(False)
         settings_layout.addWidget(self.results_table)
@@ -300,9 +320,14 @@ class MainWindow(QMainWindow):
         use_batching = self.batching_cb.isChecked()
         er_method = self.er_method_cb.currentText()
         k_lanczos = self.k_lanczos_sb.value()
-
         switch_method = self.switch_cb.currentText()
         switch_epoch = self.switch_epoch_sb.value()
+
+        if self.seed_auto_cb.isChecked():
+            current_seed = random.randint(0, 99999999)
+            self.seed_sb.setValue(current_seed)
+        else:
+            current_seed = self.seed_sb.value()
 
         self.run_btn.setEnabled(False)
         self.run_btn.setText("Выполнение...")
@@ -311,10 +336,10 @@ class MainWindow(QMainWindow):
         try:
             history = train_network(dataset, optim, self.layer_configs, epochs,
                                     batch_size, use_ema, use_batching, loss_name,
-                                    er_method, k_lanczos, switch_method, switch_epoch)
-            self.plot_results(history, optim)
+                                    er_method, k_lanczos, switch_method, switch_epoch, current_seed)
+            self.plot_results(history, optim, current_seed)
             self.add_table_row(optim, use_batching, use_ema, history['final_loss'],
-                               history['total_time'], history.get('switch_epoch', -1))
+                               history['total_time'], history.get('switch_epoch', -1), current_seed)
             self.run_counter += 1
         except Exception as e:
             QMessageBox.critical(self, "Ошибка выполнения", str(e))
@@ -322,14 +347,13 @@ class MainWindow(QMainWindow):
             self.run_btn.setEnabled(True)
             self.run_btn.setText("Запустить тест")
 
-    def plot_results(self, history, optim):
-        label_prefix = f"Тест {self.run_counter} ({optim})"
+    def plot_results(self, history, optim, seed_val):
+        label_prefix = f"Т{self.run_counter}: {optim} (s:{seed_val})"
 
         self.ax1.plot(history['loss'], linewidth=2, label=label_prefix)
         switch_ep = history.get('switch_epoch', -1)
         if switch_ep != -1:
             self.ax1.axvline(x=switch_ep, color='cyan', linestyle=':', linewidth=1.5)
-            self.ax1.text(switch_ep, history['loss'][switch_ep], ' Switched to ER', color='cyan', fontsize=8)
         self.ax1.legend(loc='upper right', fontsize=8)
 
         self.ax2.plot(history['time'], history['loss'], linewidth=2, label=label_prefix)
@@ -351,9 +375,7 @@ class MainWindow(QMainWindow):
 
         self.canvas.draw()
 
-    def add_table_row(self, optim, is_batched, use_ema, final_loss, total_time, switch_ep):
-        # self.results_table = QTableWidget(0, 5)
-        # self.results_table.setHorizontalHeaderLabels(["Оптим.", "Режим", "Loss", "Время", "Смена"])
+    def add_table_row(self, optim, is_batched, use_ema, final_loss, total_time, switch_ep, seed_val):
         row_pos = self.results_table.rowCount()
         self.results_table.insertRow(row_pos)
 
@@ -367,9 +389,8 @@ class MainWindow(QMainWindow):
         self.results_table.setItem(row_pos, 1, QTableWidgetItem(settings_str))
         self.results_table.setItem(row_pos, 2, QTableWidgetItem(f"{final_loss:.4e}"))
         self.results_table.setItem(row_pos, 3, QTableWidgetItem(f"{total_time:.2f}s"))
-
-        if self.results_table.columnCount() > 4:
-            self.results_table.setItem(row_pos, 4, QTableWidgetItem(switch_str))
+        self.results_table.setItem(row_pos, 4, QTableWidgetItem(switch_str))
+        self.results_table.setItem(row_pos, 5, QTableWidgetItem(str(seed_val)))
 
 
 if __name__ == '__main__':

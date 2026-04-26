@@ -2,6 +2,8 @@ import time
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+import random
 from model import FlexibleNN, get_dataset
 from optimizer import EROptimizer
 
@@ -43,7 +45,13 @@ def check_spectral_cost_benefit(model, loss_fn, X, y):
 
 def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
                   use_ema, use_batching, loss_name, er_method='Spectral', k_lanczos=10,
-                  switch_method='Стагнация', switch_epoch=10):
+                  switch_method='Стагнация', switch_epoch=10, seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     X, y = get_dataset(dataset_name)
 
     if loss_name == 'Cross-Entropy':
@@ -62,7 +70,10 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
     model = FlexibleNN(input_dim=X.shape[1], output_dim=output_dim, layer_configs=layer_configs)
 
     if use_batching:
-        loader = DataLoader(TensorDataset(X, y_target), batch_size=batch_size, shuffle=True)
+        g = torch.Generator()
+        g.manual_seed(seed)
+        dataset = TensorDataset(X, y_target)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=g)
     else:
         loader = [(X, y_target)]
 
@@ -99,7 +110,6 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
                         do_switch = check_spectral_cost_benefit(model, loss_fn, bx, by)
 
             if do_switch:
-                print(f"Переключение на ER на эпохе {epoch} (Метод: {switch_method})")
                 start_damping = 0.05 if use_batching else 1e-4
                 optimizer = EROptimizer(model, er_method=er_method, h=1.0,
                                         init_damping=start_damping, step_clip=1.0,
@@ -130,8 +140,7 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
             batches += 1
 
             for k, v in conds.items():
-                if k not in epoch_conds:
-                    epoch_conds[k] = []
+                if k not in epoch_conds: epoch_conds[k] = []
                 epoch_conds[k].append(v)
 
             with torch.no_grad():
@@ -160,5 +169,6 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
     history['final_loss'] = history['loss'][-1]
     history['total_time'] = history['time'][-1]
     history['switch_epoch'] = switch_epoch_record
+    history['seed'] = seed
 
     return history
