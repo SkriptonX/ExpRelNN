@@ -122,7 +122,7 @@ class MainWindow(QMainWindow):
         self.er_method_label = QLabel("Метод ER:")
         settings_layout.addWidget(self.er_method_label)
         self.er_method_cb = QComboBox()
-        self.er_method_cb.addItems(["Spectral", "Recursive", "Lanczos"])
+        self.er_method_cb.addItems(["Spectral", "Recursive", "Lanczos", "Chebyshev", "Kaczmarz"])
         self.er_method_cb.currentTextChanged.connect(self.toggle_optim_settings)
         settings_layout.addWidget(self.er_method_cb)
 
@@ -132,6 +132,13 @@ class MainWindow(QMainWindow):
         self.k_lanczos_sb.setRange(2, 50)
         self.k_lanczos_sb.setValue(10)
         settings_layout.addWidget(self.k_lanczos_sb)
+
+        self.chebyshev_k_label = QLabel("Степень полинома (Chebyshev K):")
+        settings_layout.addWidget(self.chebyshev_k_label)
+        self.chebyshev_k_sb = QSpinBox()
+        self.chebyshev_k_sb.setRange(2, 100)
+        self.chebyshev_k_sb.setValue(15)
+        settings_layout.addWidget(self.chebyshev_k_sb)
 
         self.switch_label = QLabel("Условие переключения:")
         settings_layout.addWidget(self.switch_label)
@@ -247,19 +254,23 @@ class MainWindow(QMainWindow):
         optim = self.optim_cb.currentText()
         is_er_or_hybrid = optim in ["ER", "Hybrid"]
         is_hybrid = optim == "Hybrid"
-        is_lanczos = self.er_method_cb.currentText() == "Lanczos"
+        current_er = self.er_method_cb.currentText()
+
+        is_lanczos = current_er == "Lanczos"
+        is_chebyshev = current_er == "Chebyshev"
         is_fixed = self.switch_cb.currentText() == "Фиксированная эпоха"
 
         self.er_method_label.setVisible(is_er_or_hybrid)
         self.er_method_cb.setVisible(is_er_or_hybrid)
+
         self.k_lanczos_label.setVisible(is_er_or_hybrid and is_lanczos)
         self.k_lanczos_sb.setVisible(is_er_or_hybrid and is_lanczos)
+
+        self.chebyshev_k_label.setVisible(is_er_or_hybrid and is_chebyshev)
+        self.chebyshev_k_sb.setVisible(is_er_or_hybrid and is_chebyshev)
+
         self.ema_cb.setEnabled(is_er_or_hybrid)
-        self.compress_cb.setEnabled(is_er_or_hybrid and not is_lanczos)
-        self.switch_label.setVisible(is_hybrid)
-        self.switch_cb.setVisible(is_hybrid)
-        self.switch_epoch_label.setVisible(is_hybrid and is_fixed)
-        self.switch_epoch_sb.setVisible(is_hybrid and is_fixed)
+        self.compress_cb.setEnabled(is_er_or_hybrid and not (is_lanczos or is_chebyshev))
 
     def toggle_er_settings(self, text):
         is_er = (text == "ER")
@@ -325,6 +336,7 @@ class MainWindow(QMainWindow):
         use_batching = self.batching_cb.isChecked()
         er_method = self.er_method_cb.currentText()
         k_lanczos = self.k_lanczos_sb.value()
+        chebyshev_k = self.chebyshev_k_sb.value()
         switch_method = self.switch_cb.currentText()
         switch_epoch = self.switch_epoch_sb.value()
         use_compression = self.compress_cb.isChecked()
@@ -343,7 +355,7 @@ class MainWindow(QMainWindow):
             history = train_network(dataset, optim, self.layer_configs, epochs,
                                     batch_size, use_ema, use_batching, loss_name,
                                     er_method, k_lanczos, switch_method, switch_epoch,
-                                    current_seed, use_compression)
+                                    current_seed, use_compression, chebyshev_k)
             self.plot_results(history, optim, current_seed)
             self.add_table_row(optim, use_batching, use_ema, history['final_loss'],
                                history['total_time'], history.get('switch_epoch', -1),

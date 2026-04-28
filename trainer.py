@@ -70,7 +70,8 @@ def check_spectral_cost_benefit(model, loss_fn, X, y):
 
 def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
                   use_ema, use_batching, loss_name, er_method='Spectral', k_lanczos=10,
-                  switch_method='Стагнация', switch_epoch=10, seed=42, use_compression=False):
+                  switch_method='Стагнация', switch_epoch=10, seed=42, use_compression=False,
+                  chebyshev_k=15):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -116,7 +117,7 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
         optimizer = EROptimizer(model, er_method=er_method, h=1.0,
                                 init_damping=start_damping, step_clip=1.0,
                                 use_ema=use_ema, ema_beta=0.9, k_lanczos=k_lanczos,
-                                use_compression=use_compression)
+                                use_compression=use_compression, chebyshev_k=chebyshev_k)
 
     history = {'loss': [], 'time': [], 'cond': {}, 'weight_cond': {}}
     start_time = time.time()
@@ -140,7 +141,7 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
                 optimizer = EROptimizer(model, er_method=er_method, h=1.0,
                                         init_damping=start_damping, step_clip=1.0,
                                         use_ema=use_ema, ema_beta=0.9, k_lanczos=k_lanczos,
-                                        use_compression=use_compression)
+                                        use_compression=use_compression, chebyshev_k=chebyshev_k)
                 active_optim_name = 'ER'
                 switched_to_er = True
                 switch_epoch_record = epoch

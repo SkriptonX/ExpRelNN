@@ -4,7 +4,7 @@ import torch
 class EROptimizer:
     def __init__(self, model, er_method='Spectral', h=1.0, init_damping=0.05,
                  step_clip=1.0, use_ema=True, ema_beta=0.9, k_lanczos=10,
-                 use_compression=False, compression_threshold=1e-4):
+                 use_compression=False, compression_threshold=1e-4, chebyshev_k=15):
         self.model = model
         self.er_method = er_method
         self.h = h
@@ -12,7 +12,7 @@ class EROptimizer:
         self.use_ema = use_ema
         self.ema_beta = ema_beta
         self.k_lanczos = k_lanczos
-
+        self.chebyshev_k = chebyshev_k
         self.use_compression = use_compression
         self.compression_threshold = compression_threshold
 
@@ -26,6 +26,20 @@ class EROptimizer:
         self.model.zero_grad()
         loss.backward(create_graph=True)
 
+        kaczmarz_grads = {}
+        if self.er_method == 'Kaczmarz':
+            batch_size_full = X.size(0)
+            subset_size = min(16, batch_size_full)  # Размер блока
+            indices = torch.randperm(batch_size_full, device=X.device)[:subset_size]
+            x_sub = X[indices]
+            y_sub = y[indices]
+
+            loss_sub = loss_fn(self.model(x_sub), y_sub)
+
+            k_grads = torch.autograd.grad(loss_sub, self.model.parameters(), create_graph=True)
+            for (name, _), g in zip(self.model.named_parameters(), k_grads):
+                kaczmarz_grads[name] = g
+
         updates = {}
         condition_numbers = {}
         expected_decrease = 0.0
@@ -38,8 +52,81 @@ class EROptimizer:
             n = grad_1d.size(0)
             g_val = grad_1d.detach()
 
-            if self.er_method == 'Lanczos':
-                def calc_hv(v):
+            def calc_hv(v):
+                gv = torch.dot(grad_1d, v)
+                hv = torch.autograd.grad(gv, p, retain_graph=True)[0].view(-1)
+                return hv.detach()
+
+            def calc_hv_damped(v):
+                return calc_hv(v) + current_damping * v
+
+            if self.er_method == 'Chebyshev':
+                v_iter = g_val / (torch.norm(g_val) + 1e-8)
+                for _ in range(10):
+                    Hv = calc_hv_damped(v_iter)
+                    l_max_est = torch.abs(torch.dot(v_iter, Hv)).item()
+                    v_iter = Hv / (torch.norm(Hv) + 1e-8)
+
+                l_max = l_max_est * 1.2 + 1e-4
+                condition_numbers[name] = l_max / current_damping
+
+                K = min(self.chebyshev_k, n)
+                nodes = torch.cos(torch.pi * (torch.arange(K, dtype=p.dtype, device=p.device) + 0.5) / K)
+                x_nodes = (l_max / 2.0) * (nodes + 1.0)
+                f_nodes = (1.0 - torch.exp(-self.h * x_nodes)) / x_nodes
+
+                c = torch.zeros(K, dtype=p.dtype, device=p.device)
+                for j in range(K):
+                    cos_terms = torch.cos(j * torch.pi * (torch.arange(K, device=p.device) + 0.5) / K)
+                    c[j] = (2.0 / K) * torch.sum(f_nodes * cos_terms)
+                c[0] /= 2.0
+
+                v_0 = g_val
+                step = c[0] * v_0
+
+                if K > 1:
+                    v_1 = (2.0 / l_max) * calc_hv_damped(v_0) - v_0
+                    step += c[1] * v_1
+
+                    v_k_minus_1 = v_0
+                    v_k = v_1
+                    for j in range(2, K):
+                        H_tilde_vk = (2.0 / l_max) * calc_hv_damped(v_k) - v_k
+                        v_next = 2.0 * H_tilde_vk - v_k_minus_1
+                        step += c[j] * v_next
+                        v_k_minus_1 = v_k
+                        v_k = v_next
+
+                H_eff = None
+
+            elif self.er_method == 'Kaczmarz':
+                grad_sub = kaczmarz_grads[name].view(-1)
+
+                H_sub = []
+                for i in range(n):
+                    g2 = torch.autograd.grad(grad_sub[i], p, retain_graph=True)[0]
+                    H_sub.append(g2.view(-1))
+                H_sub = torch.stack(H_sub).detach()
+                H_sub = 0.5 * (H_sub + H_sub.T)
+
+                L, V = torch.linalg.eigh(H_sub)
+                lam_max = torch.max(torch.abs(L)).item()
+                lam_min = torch.min(torch.abs(L)).item()
+                condition_numbers[name] = lam_max / (lam_min + 1e-8)
+
+                diag = torch.zeros_like(L)
+                for i, lam in enumerate(L):
+                    abs_lam = torch.abs(lam) + current_damping
+                    arg = -self.h * abs_lam
+                    diag[i] = (1.0 - torch.exp(arg)) / abs_lam
+
+                H_inv_er = V @ torch.diag(diag) @ V.T
+
+                step = H_inv_er @ g_val
+                H_eff = H_sub
+
+            elif self.er_method == 'Lanczos':
+                def calc_hv_local(v):
                     gv = torch.dot(grad_1d, v)
                     hv = torch.autograd.grad(gv, p, retain_graph=True)[0].view(-1)
                     return hv.detach()
@@ -60,7 +147,7 @@ class EROptimizer:
                 beta = 0.0
 
                 for j in range(k):
-                    w = calc_hv(Q[:, j])
+                    w = calc_hv_local(Q[:, j])
                     w = w - beta * v_prev
                     alpha = torch.dot(w, Q[:, j])
                     alphas[j] = alpha
@@ -123,9 +210,18 @@ class EROptimizer:
                         H_new = self.ema_beta * H_old + (1 - self.ema_beta) * H
 
                     if self.use_compression:
-                        mask = torch.abs(H_new) > self.compression_threshold
-                        H_pruned = H_new * mask
-                        self.state['hessian_ema'][name] = H_pruned.to_sparse_csr()
+                        max_val = torch.max(torch.abs(H_new)).item()
+                        adaptive_threshold = max(self.compression_threshold, max_val * 0.01)
+                        mask = torch.abs(H_new) > adaptive_threshold
+                        nnz = torch.sum(mask).item()
+                        total_elements = H_new.numel()
+                        sparsity = 1.0 - (nnz / total_elements)
+
+                        if sparsity > 0.6:
+                            H_pruned = H_new * mask
+                            self.state['hessian_ema'][name] = H_pruned.to_sparse_csr()
+                        else:
+                            self.state['hessian_ema'][name] = H_new
                     else:
                         self.state['hessian_ema'][name] = H_new
 
@@ -176,7 +272,7 @@ class EROptimizer:
             dw = -step
             updates[name] = dw.view(p.size())
 
-            if self.er_method != 'Lanczos' and H_eff is not None:
+            if self.er_method not in ['Lanczos', 'Chebyshev'] and H_eff is not None:
                 dec = -(torch.dot(g_val, dw) + 0.5 * torch.dot(dw, H_eff @ dw))
                 expected_decrease += dec.item()
             else:
