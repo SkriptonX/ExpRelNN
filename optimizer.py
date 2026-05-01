@@ -93,9 +93,14 @@ class EROptimizer:
 
                 K = min(self.chebyshev_k, n)
                 nodes = torch.cos(torch.pi * (torch.arange(K, dtype=p.dtype, device=p.device) + 0.5) / K)
-                x_nodes = (l_max / 2.0) * (nodes + 1.0) + current_damping
 
-                f_nodes = (1.0 - torch.exp(-self.h * x_nodes)) / x_nodes
+                x_nodes = l_max * nodes
+
+                lam_orig = x_nodes - current_damping
+
+                abs_lam = torch.abs(lam_orig) + current_damping
+
+                f_nodes = (1.0 - torch.exp(-self.h * abs_lam)) / abs_lam
 
                 c = torch.zeros(K, dtype=p.dtype, device=p.device)
                 for j in range(K):
@@ -107,14 +112,15 @@ class EROptimizer:
                 step = c[0] * v_0
 
                 if K > 1:
-                    v_1 = (2.0 / l_max) * calc_hv_damped(v_0) - v_0
+                    v_1 = (1.0 / l_max) * calc_hv_damped(v_0)
                     step += c[1] * v_1
+
                     v_k_minus_1 = v_0
                     v_k = v_1
                     for j in range(2, K):
-                        H_tilde_vk = (2.0 / l_max) * calc_hv_damped(v_k) - v_k
-                        v_next = 2.0 * H_tilde_vk - v_k_minus_1
+                        v_next = (2.0 / l_max) * calc_hv_damped(v_k) - v_k_minus_1
                         step += c[j] * v_next
+
                         v_k_minus_1 = v_k
                         v_k = v_next
                 H_eff = None
@@ -307,7 +313,6 @@ class EROptimizer:
                 if name in updates:
                     p.add_(updates[name])
 
-
         with torch.enable_grad():
             if not X.requires_grad:
                 X.requires_grad_(True)
@@ -316,14 +321,27 @@ class EROptimizer:
 
         actual_decrease = loss.item() - new_loss
 
+
+        if actual_decrease < 0:
+            with torch.no_grad():
+                for name, p in self.model.named_parameters():
+                    if name in updates:
+                        p.sub_(updates[name])
+
+
+            self.state['damping'] = min(100000.0, self.state['damping'] * 10.0)
+
+            return loss.item(), condition_numbers
+
+
         if expected_decrease > 1e-8:
             rho = actual_decrease / expected_decrease
         else:
             rho = 0.0
 
         if rho > 0.75:
-            self.state['damping'] = max(1e-4, self.state['damping'] * 0.5)
+            self.state['damping'] = max(1e-5, self.state['damping'] * 0.5)
         elif rho < 0.25:
-            self.state['damping'] = min(10.0, self.state['damping'] * 2.0)
+            self.state['damping'] = min(100000.0, self.state['damping'] * 2.0)
 
         return new_loss, condition_numbers
