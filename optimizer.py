@@ -22,23 +22,39 @@ class EROptimizer:
         }
 
     def step(self, loss_fn, X, y):
+        if not X.requires_grad:
+            X.requires_grad_(True)
+
         loss = loss_fn(self.model(X), y)
         self.model.zero_grad()
-        loss.backward(create_graph=True)
+
+        grads_tuple = torch.autograd.grad(loss, self.model.parameters(), create_graph=True, allow_unused=True)
+        global_grads = {}
+        for (name, p), g in zip(self.model.named_parameters(), grads_tuple):
+            if g is None:
+                global_grads[name] = torch.zeros_like(p)
+            else:
+                global_grads[name] = g
 
         kaczmarz_grads = {}
         if self.er_method == 'Kaczmarz':
             batch_size_full = X.size(0)
-            subset_size = min(16, batch_size_full)  # Размер блока
+            subset_size = min(16, batch_size_full)
             indices = torch.randperm(batch_size_full, device=X.device)[:subset_size]
             x_sub = X[indices]
             y_sub = y[indices]
 
-            loss_sub = loss_fn(self.model(x_sub), y_sub)
+            if hasattr(loss_fn, 'X_batch'):
+                original_X = loss_fn.X_batch
+                loss_fn.X_batch = x_sub
 
-            k_grads = torch.autograd.grad(loss_sub, self.model.parameters(), create_graph=True)
-            for (name, _), g in zip(self.model.named_parameters(), k_grads):
-                kaczmarz_grads[name] = g
+            loss_sub = loss_fn(self.model(x_sub), y_sub)
+            k_tuple = torch.autograd.grad(loss_sub, self.model.parameters(), create_graph=True, allow_unused=True)
+            for (name, p), g in zip(self.model.named_parameters(), k_tuple):
+                kaczmarz_grads[name] = g if g is not None else torch.zeros_like(p)
+
+            if hasattr(loss_fn, 'X_batch'):
+                loss_fn.X_batch = original_X
 
         updates = {}
         condition_numbers = {}
@@ -46,16 +62,21 @@ class EROptimizer:
         current_damping = self.state['damping']
 
         for name, p in self.model.named_parameters():
-            if p.grad is None: continue
-
-            grad_1d = p.grad.view(-1)
+            grad_1d = global_grads[name].view(-1)
             n = grad_1d.size(0)
             g_val = grad_1d.detach()
 
+            if not grad_1d.requires_grad:
+                updates[name] = (-self.h * g_val).view(p.size())
+                condition_numbers[name] = 1.0
+                expected_decrease += (self.h * torch.sum(g_val ** 2)).item()
+                continue
+
             def calc_hv(v):
                 gv = torch.dot(grad_1d, v)
-                hv = torch.autograd.grad(gv, p, retain_graph=True)[0].view(-1)
-                return hv.detach()
+                hv = torch.autograd.grad(gv, p, retain_graph=True, allow_unused=True)[0]
+                if hv is None: return torch.zeros_like(v)
+                return hv.view(-1).detach()
 
             def calc_hv_damped(v):
                 return calc_hv(v) + current_damping * v
@@ -72,7 +93,8 @@ class EROptimizer:
 
                 K = min(self.chebyshev_k, n)
                 nodes = torch.cos(torch.pi * (torch.arange(K, dtype=p.dtype, device=p.device) + 0.5) / K)
-                x_nodes = (l_max / 2.0) * (nodes + 1.0)
+                x_nodes = (l_max / 2.0) * (nodes + 1.0) + current_damping
+
                 f_nodes = (1.0 - torch.exp(-self.h * x_nodes)) / x_nodes
 
                 c = torch.zeros(K, dtype=p.dtype, device=p.device)
@@ -87,7 +109,6 @@ class EROptimizer:
                 if K > 1:
                     v_1 = (2.0 / l_max) * calc_hv_damped(v_0) - v_0
                     step += c[1] * v_1
-
                     v_k_minus_1 = v_0
                     v_k = v_1
                     for j in range(2, K):
@@ -96,15 +117,19 @@ class EROptimizer:
                         step += c[j] * v_next
                         v_k_minus_1 = v_k
                         v_k = v_next
-
                 H_eff = None
 
             elif self.er_method == 'Kaczmarz':
                 grad_sub = kaczmarz_grads[name].view(-1)
 
+                if not grad_sub.requires_grad:
+                    updates[name] = (-self.h * g_val).view(p.size())
+                    continue
+
                 H_sub = []
                 for i in range(n):
-                    g2 = torch.autograd.grad(grad_sub[i], p, retain_graph=True)[0]
+                    g2 = torch.autograd.grad(grad_sub[i], p, retain_graph=True, allow_unused=True)[0]
+                    if g2 is None: g2 = torch.zeros_like(p)
                     H_sub.append(g2.view(-1))
                 H_sub = torch.stack(H_sub).detach()
                 H_sub = 0.5 * (H_sub + H_sub.T)
@@ -121,16 +146,10 @@ class EROptimizer:
                     diag[i] = (1.0 - torch.exp(arg)) / abs_lam
 
                 H_inv_er = V @ torch.diag(diag) @ V.T
-
                 step = H_inv_er @ g_val
                 H_eff = H_sub
 
             elif self.er_method == 'Lanczos':
-                def calc_hv_local(v):
-                    gv = torch.dot(grad_1d, v)
-                    hv = torch.autograd.grad(gv, p, retain_graph=True)[0].view(-1)
-                    return hv.detach()
-
                 k = min(self.k_lanczos, n)
                 Q = torch.zeros((n, k), device=p.device)
                 alphas = torch.zeros(k, device=p.device)
@@ -147,7 +166,7 @@ class EROptimizer:
                 beta = 0.0
 
                 for j in range(k):
-                    w = calc_hv_local(Q[:, j])
+                    w = calc_hv(Q[:, j])
                     w = w - beta * v_prev
                     alpha = torch.dot(w, Q[:, j])
                     alphas[j] = alpha
@@ -186,15 +205,16 @@ class EROptimizer:
                 H_eff = None
 
             else:
-                if n > 400:
-                    updates[name] = -0.01 * g_val
+                if n > 5000:
+                    updates[name] = (-0.01 * g_val).view(p.size())
                     condition_numbers[name] = 1.0
                     expected_decrease += (0.01 * torch.sum(g_val ** 2)).item()
                     continue
 
                 H = []
                 for i in range(n):
-                    g2 = torch.autograd.grad(grad_1d[i], p, retain_graph=True)[0]
+                    g2 = torch.autograd.grad(grad_1d[i], p, retain_graph=True, allow_unused=True)[0]
+                    if g2 is None: g2 = torch.zeros_like(p)
                     H.append(g2.view(-1))
 
                 H = torch.stack(H).detach()
@@ -207,7 +227,11 @@ class EROptimizer:
                         H_old = self.state['hessian_ema'][name]
                         if H_old.layout == torch.sparse_csr:
                             H_old = H_old.to_dense()
-                        H_new = self.ema_beta * H_old + (1 - self.ema_beta) * H
+
+                        if H_old.shape != H.shape:
+                            H_new = H
+                        else:
+                            H_new = self.ema_beta * H_old + (1 - self.ema_beta) * H
 
                     if self.use_compression:
                         max_val = torch.max(torch.abs(H_new)).item()
@@ -283,8 +307,12 @@ class EROptimizer:
                 if name in updates:
                     p.add_(updates[name])
 
-        with torch.no_grad():
-            new_loss = loss_fn(self.model(X), y).item()
+
+        with torch.enable_grad():
+            if not X.requires_grad:
+                X.requires_grad_(True)
+            new_loss_tensor = loss_fn(self.model(X), y)
+            new_loss = new_loss_tensor.item()
 
         actual_decrease = loss.item() - new_loss
 

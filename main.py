@@ -110,7 +110,11 @@ class MainWindow(QMainWindow):
 
         settings_layout.addWidget(QLabel("Датасет:"))
         self.dataset_cb = QComboBox()
-        self.dataset_cb.addItems(["Synthetic Ravine", "Moons", "Classification"])
+        self.dataset_cb.addItems([
+            "Synthetic Ravine", "Moons", "Classification",
+            "SIREN (Image Fitting)", "PINN (Allen-Cahn)"
+        ])
+        self.dataset_cb.currentIndexChanged.connect(self.auto_configure_experiment)
         settings_layout.addWidget(self.dataset_cb)
 
         settings_layout.addWidget(QLabel("Оптимизатор:"))
@@ -246,6 +250,46 @@ class MainWindow(QMainWindow):
         self.ax3 = self.figure.add_subplot(413)
         self.ax4 = self.figure.add_subplot(414)
         self.setup_axes()
+
+    def auto_configure_experiment(self):
+        ds = self.dataset_cb.currentText()
+
+        if ds == "SIREN (Image Fitting)":
+            self.layer_configs = [
+                {'units': 128, 'activation': 'Sine'},
+                {'units': 128, 'activation': 'Sine'},
+                {'units': 128, 'activation': 'Sine'},
+                {'units': 128, 'activation': 'Sine'}
+            ]
+            self.optim_cb.setCurrentText("Hybrid")
+            self.er_method_cb.setCurrentText("Lanczos")
+            self.k_lanczos_sb.setValue(20)
+            self.batching_cb.setChecked(False)
+            self.epochs_sb.setValue(300)
+            self.loss_cb.setCurrentText("MSE")
+            self.switch_cb.setCurrentText("Фиксированная эпоха")
+            self.switch_epoch_sb.setValue(100)
+
+        elif ds == "PINN (Allen-Cahn)":
+            self.layer_configs = [
+                {'units': 50, 'activation': 'Tanh'},
+                {'units': 50, 'activation': 'Tanh'},
+                {'units': 50, 'activation': 'Tanh'},
+                {'units': 50, 'activation': 'Tanh'}
+            ]
+            self.optim_cb.setCurrentText("Hybrid")
+            self.er_method_cb.setCurrentText("Chebyshev")
+            self.chebyshev_k_sb.setValue(30)
+            self.batching_cb.setChecked(False)
+            self.epochs_sb.setValue(500)
+            self.loss_cb.setCurrentText("MSE")
+            self.switch_cb.setCurrentText("Стагнация (Stagnation)")
+
+        else:
+            self.layer_configs = [{'units': 8, 'activation': 'Tanh'}, {'units': 8, 'activation': 'Tanh'}]
+
+        QMessageBox.information(self, "Авто-настройка",
+                                f"Применены оптимальные архитектурные и алгоритмические параметры для эксперимента: {ds}")
 
     def toggle_batching(self, state):
         self.batch_sb.setEnabled(state == Qt.Checked)

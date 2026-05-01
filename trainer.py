@@ -33,6 +33,50 @@ def get_memory_footprint_mb(model, optimizer):
 
     return mem_bytes / (1024 * 1024)
 
+
+class PINN_AllenCahn_Loss:
+    def __init__(self, model, X_batch):
+        self.model = model
+        self.X_batch = X_batch
+        if not self.X_batch.requires_grad:
+            self.X_batch.requires_grad_(True)
+
+    def __call__(self, pred, y_dummy):
+        du_dX_tuple = torch.autograd.grad(
+            pred, self.X_batch,
+            grad_outputs=torch.ones_like(pred),
+            create_graph=True,
+            retain_graph=True,
+            allow_unused=True
+        )
+
+        if du_dX_tuple[0] is None:
+            du_dX = torch.zeros_like(self.X_batch)
+        else:
+            du_dX = du_dX_tuple[0]
+
+        du_dx = du_dX[:, 0:1]
+        du_dt = du_dX[:, 1:2]
+
+        if du_dx.requires_grad:
+            d2u_dx2_tuple = torch.autograd.grad(
+                du_dx, self.X_batch,
+                grad_outputs=torch.ones_like(du_dx),
+                create_graph=True,
+                retain_graph=True,
+                allow_unused=True
+            )
+            if d2u_dx2_tuple[0] is None:
+                d2u_dx2 = torch.zeros_like(du_dx)
+            else:
+                d2u_dx2 = d2u_dx2_tuple[0][:, 0:1]
+        else:
+            d2u_dx2 = torch.zeros_like(du_dx)
+
+        residual = du_dt - 0.0001 * d2u_dx2 + 5 * (pred ** 3) - 5 * pred
+
+        return torch.mean(residual ** 2)
+
 def check_spectral_cost_benefit(model, loss_fn, X, y):
     loss = loss_fn(model(X), y)
     model.zero_grad()
@@ -78,9 +122,17 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    X, y = get_dataset(dataset_name)
+    n_samples = 4000 if 'SIREN' in dataset_name or 'PINN' in dataset_name else 1000
+    X, y = get_dataset(dataset_name, n_samples=n_samples)
 
-    if loss_name == 'Cross-Entropy':
+    if 'SIREN' in dataset_name:
+        output_dim = 1
+        loss_fn = nn.MSELoss()
+        y_target = y.float()
+    elif 'PINN' in dataset_name:
+        output_dim = 1
+        y_target = y.float()
+    elif loss_name == 'Cross-Entropy':
         output_dim = 2
         loss_fn = nn.CrossEntropyLoss()
         y_target = y
@@ -152,17 +204,22 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
         batches = 0
 
         for bx, by in loader:
+            if 'PINN' in dataset_name:
+                current_loss_fn = PINN_AllenCahn_Loss(model, bx)
+            else:
+                current_loss_fn = loss_fn
+
             if active_optim_name in ['Adam', 'SGD']:
                 model.zero_grad()
                 out = model(bx)
-                loss = loss_fn(out, by)
+                loss = current_loss_fn(out, by)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
                 optimizer.step()
                 loss_val = loss.item()
                 conds = {}
             else:
-                loss_val, conds = optimizer.step(loss_fn, bx, by)
+                loss_val, conds = optimizer.step(current_loss_fn, bx, by)
 
             epoch_loss += loss_val
             batches += 1
