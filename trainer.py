@@ -275,4 +275,13 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
 
     history['memory_mb'] = get_memory_footprint_mb(model, optimizer)
 
+    history['model'] = model
+
+    if hasattr(loader, 'dataset') and hasattr(loader.dataset, 'tensors'):
+        history['X'] = loader.dataset.tensors[0]
+        history['y'] = loader.dataset.tensors[1]
+    else:
+        history['X'] = bx.detach()
+        history['y'] = by.detach()
+
     return history

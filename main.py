@@ -1,10 +1,14 @@
 import sys
 import random
+import numpy as np
+import torch
+from scipy.interpolate import griddata
+from matplotlib.colors import SymLogNorm
 from trainer import train_network
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QComboBox, QSpinBox, QPushButton, QMessageBox,
                              QDialog, QScrollArea, QFrame, QCheckBox, QTableWidgetItem,
-                             QTableWidget, QHeaderView, QProgressBar)
+                             QTableWidget, QHeaderView, QProgressBar, QTabWidget)
 from PyQt5.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -94,7 +98,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Анализ послойной овражности (Метод ЭР)")
-        self.resize(1300, 900)
+        self.resize(1400, 950)
 
         self.layer_configs = [{'units': 8, 'activation': 'Tanh'}, {'units': 8, 'activation': 'Tanh'}]
         self.run_counter = 1
@@ -177,7 +181,7 @@ class MainWindow(QMainWindow):
 
         settings_layout.addWidget(QLabel("Эпохи:"))
         self.epochs_sb = QSpinBox()
-        self.epochs_sb.setRange(5, 1000)
+        self.epochs_sb.setRange(5, 5000)
         self.epochs_sb.setValue(30)
         self.epochs_sb.setSingleStep(5)
         settings_layout.addWidget(self.epochs_sb)
@@ -221,7 +225,6 @@ class MainWindow(QMainWindow):
 
         self.compress_cb = QCheckBox("Сжатие памяти (CSR Pruning)")
         self.compress_cb.setChecked(False)
-        self.compress_cb.setToolTip("Упаковывает матрицы Гессе в разреженный формат CSR")
         settings_layout.addWidget(self.compress_cb)
 
         settings_layout.addSpacing(10)
@@ -253,9 +256,14 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(settings_panel)
 
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        self.tab_metrics = QWidget()
+        metrics_layout = QVBoxLayout(self.tab_metrics)
         self.figure = Figure(figsize=(8, 12))
         self.canvas = FigureCanvas(self.figure)
-        layout.addWidget(self.canvas)
+        metrics_layout.addWidget(self.canvas)
 
         self.ax1 = self.figure.add_subplot(411)
         self.ax2 = self.figure.add_subplot(412)
@@ -263,12 +271,20 @@ class MainWindow(QMainWindow):
         self.ax4 = self.figure.add_subplot(414)
         self.setup_axes()
 
+        self.tab_visual = QWidget()
+        visual_layout = QVBoxLayout(self.tab_visual)
+        self.res_figure = Figure(figsize=(10, 8))
+        self.res_canvas = FigureCanvas(self.res_figure)
+        visual_layout.addWidget(self.res_canvas)
+
+        self.tabs.addTab(self.tab_metrics, "Графики сходимости")
+        self.tabs.addTab(self.tab_visual, "Визуализация результата")
+
     def auto_configure_experiment(self):
         ds = self.dataset_cb.currentText()
 
         if ds == "SIREN (Image Fitting)":
             self.layer_configs = [
-                {'units': 128, 'activation': 'Sine'},
                 {'units': 128, 'activation': 'Sine'},
                 {'units': 128, 'activation': 'Sine'},
                 {'units': 128, 'activation': 'Sine'}
@@ -287,13 +303,12 @@ class MainWindow(QMainWindow):
             self.layer_configs = [
                 {'units': 50, 'activation': 'Tanh'},
                 {'units': 50, 'activation': 'Tanh'},
-                {'units': 50, 'activation': 'Tanh'},
                 {'units': 50, 'activation': 'Tanh'}
             ]
             self.optim_cb.setCurrentText("Hybrid")
             self.hybrid_base_cb.setCurrentText("L-BFGS")
             self.er_method_cb.setCurrentText("Chebyshev")
-            self.chebyshev_k_sb.setValue(30)
+            self.chebyshev_k_sb.setValue(7)
             self.batching_cb.setChecked(False)
             self.epochs_sb.setValue(500)
             self.loss_cb.setCurrentText("MSE")
@@ -302,8 +317,7 @@ class MainWindow(QMainWindow):
         else:
             self.layer_configs = [{'units': 8, 'activation': 'Tanh'}, {'units': 8, 'activation': 'Tanh'}]
 
-        QMessageBox.information(self, "Авто-настройка",
-                                f"Применены оптимальные архитектурные и алгоритмические параметры для эксперимента: {ds}")
+        QMessageBox.information(self, "Авто-настройка", f"Применены настройки для: {ds}")
 
     def toggle_batching(self, state):
         self.batch_sb.setEnabled(state == Qt.Checked)
@@ -317,26 +331,20 @@ class MainWindow(QMainWindow):
         current_er = self.er_method_cb.currentText()
         is_lanczos = current_er == "Lanczos"
         is_chebyshev = current_er == "Chebyshev"
-
         is_switch_fixed = self.switch_cb.currentText() == "Фиксированная эпоха"
 
         self.hybrid_base_label.setVisible(is_hybrid)
         self.hybrid_base_cb.setVisible(is_hybrid)
-
         self.er_method_label.setVisible(is_er_family)
         self.er_method_cb.setVisible(is_er_family)
-
         self.k_lanczos_label.setVisible(is_er_family and is_lanczos)
         self.k_lanczos_sb.setVisible(is_er_family and is_lanczos)
-
         self.chebyshev_k_label.setVisible(is_er_family and is_chebyshev)
         self.chebyshev_k_sb.setVisible(is_er_family and is_chebyshev)
-
         self.switch_label.setVisible(is_hybrid)
         self.switch_cb.setVisible(is_hybrid)
         self.switch_epoch_label.setVisible(is_hybrid and is_switch_fixed)
         self.switch_epoch_sb.setVisible(is_hybrid and is_switch_fixed)
-
         self.ema_cb.setVisible(is_er_family)
         self.compress_cb.setVisible(is_er_family)
         self.compress_cb.setEnabled(not (is_lanczos or is_chebyshev))
@@ -354,27 +362,27 @@ class MainWindow(QMainWindow):
         self.ax2.set_yscale('log')
         self.ax2.grid(True, linestyle='--', alpha=0.7)
 
-        self.ax3.set_title("Обусловленность Гессиана (только метод ER)")
+        self.ax3.set_title("Обусловленность Гессиана")
         self.ax3.set_xlabel("Эпоха")
-        self.ax3.set_ylabel("Condition Number")
+        self.ax3.set_ylabel("Cond")
         self.ax3.set_yscale('log')
         self.ax3.grid(True, linestyle='--', alpha=0.7)
 
-        self.ax4.set_title("Обусловленность матриц весов (SVD)")
+        self.ax4.set_title("Обусловленность весов")
         self.ax4.set_xlabel("Эпоха")
-        self.ax4.set_ylabel("Condition Number")
+        self.ax4.set_ylabel("Cond")
         self.ax4.set_yscale('log')
         self.ax4.grid(True, linestyle='--', alpha=0.7)
-
         self.figure.tight_layout()
 
     def clear_data(self):
-        self.ax1.clear()
-        self.ax2.clear()
-        self.ax3.clear()
-        self.ax4.clear()
+        self.figure.clear()
         self.setup_axes()
         self.canvas.draw()
+
+        self.res_figure.clear()
+        self.res_canvas.draw()
+
         self.run_counter = 1
         self.results_table.setRowCount(0)
 
@@ -423,7 +431,9 @@ class MainWindow(QMainWindow):
                                     er_method, k_lanczos, switch_method, switch_epoch,
                                     current_seed, use_compression, chebyshev_k, hybrid_base,
                                     progress_callback=update_progress)
+
             self.plot_results(history, optim, current_seed)
+            self.plot_visualization(history, dataset, optim, current_seed)
 
             display_optim = f"Hybrid ({hybrid_base} -> ER)" if optim == "Hybrid" else optim
             if optim == "ER": display_optim = f"ER ({er_method})"
@@ -432,6 +442,9 @@ class MainWindow(QMainWindow):
                                history['total_time'], history.get('switch_epoch', -1),
                                current_seed, history['memory_mb'])
             self.run_counter += 1
+
+            self.tabs.setCurrentIndex(1)
+
         except Exception as e:
             QMessageBox.critical(self, "Ошибка выполнения", str(e))
         finally:
@@ -451,7 +464,7 @@ class MainWindow(QMainWindow):
         self.ax2.plot(history['time'], history['loss'], linewidth=2, label=label_prefix)
         self.ax2.legend(loc='upper right', fontsize=8)
 
-        if (optim == 'ER' or optim == 'Hybrid') and history['cond']:
+        if (optim == 'ER' or optim == 'Hybrid') and history.get('cond'):
             for layer_name, conds in history['cond'].items():
                 if 'weight' in layer_name:
                     layer_label = layer_name.replace('.weight', '')
@@ -467,16 +480,112 @@ class MainWindow(QMainWindow):
 
         self.canvas.draw()
 
+    def plot_visualization(self, history, dataset_name, optim, seed_val):
+        model = history.get('model')
+        X_tensor = history.get('X')
+        y_tensor = history.get('y')
+
+        if model is None or X_tensor is None or y_tensor is None:
+            return
+
+        self.res_figure.clear()
+
+        try:
+            X_numpy = X_tensor.cpu().numpy()
+            y_raw = y_tensor.cpu().numpy()
+            model.eval()
+
+            if dataset_name in ["Moons", "Classification"]:
+                ax = self.res_figure.add_subplot(111)
+
+                x_min, x_max = X_numpy[:, 0].min() - 0.5, X_numpy[:, 0].max() + 0.5
+                y_min, y_max = X_numpy[:, 1].min() - 0.5, X_numpy[:, 1].max() + 0.5
+                xx, yy = np.meshgrid(np.linspace(x_min, x_max, 100), np.linspace(y_min, y_max, 100))
+                grid_tensor = torch.tensor(np.c_[xx.ravel(), yy.ravel()], dtype=torch.float32, device=X_tensor.device)
+
+                with torch.no_grad():
+                    Z = model(grid_tensor).cpu().numpy()
+
+                Z = Z.reshape(xx.shape) if Z.shape[1] == 1 else Z.argmax(axis=1).reshape(xx.shape)
+
+                ax.contourf(xx, yy, Z, levels=20, cmap='RdBu', alpha=0.5)
+                ax.scatter(X_numpy[:, 0], X_numpy[:, 1], c=y_raw.squeeze(), cmap='RdBu', edgecolors='k', s=40)
+                ax.set_title(f"Разделяющая плоскость: {optim}")
+
+            elif dataset_name == "SIREN (Image Fitting)":
+                size = int(np.sqrt(X_numpy.shape[0]))
+                if size * size == X_numpy.shape[0]:
+                    ax1 = self.res_figure.add_subplot(121)
+                    ax2 = self.res_figure.add_subplot(122)
+
+                    with torch.no_grad():
+                        pred = model(X_tensor).cpu().numpy()
+
+                    y_img = y_raw.reshape(size, size) if y_raw.shape[1] == 1 else y_raw.reshape(size, size, 3)
+                    pred_img = pred.reshape(size, size) if pred.shape[1] == 1 else pred.reshape(size, size, 3)
+
+                    ax1.imshow(y_img, cmap='gray' if y_raw.shape[1] == 1 else None)
+                    ax1.set_title("Original Image")
+                    ax1.axis('off')
+
+                    ax2.imshow(np.clip(pred_img, 0, 1), cmap='gray' if pred.shape[1] == 1 else None)
+                    ax2.set_title(f"Reconstruction: {optim}")
+                    ax2.axis('off')
+
+            elif dataset_name == "PINN (Allen-Cahn)":
+                axes = self.res_figure.subplots(1, 2, sharey=True)
+                ax_pred, ax_exact = axes
+                x_coord = X_numpy[:, 0]
+                t_coord = X_numpy[:, 1]
+                x_min, x_max = x_coord.min(), x_coord.max()
+                t_min, t_max = t_coord.min(), t_coord.max()
+                with torch.no_grad():
+                    pred_raw = model(X_tensor).cpu().numpy()
+                y_exact_vals = y_raw.squeeze()
+                pred_final_vals = pred_raw.squeeze()
+                N_plot = 200
+                xi = np.linspace(x_min, x_max, N_plot)
+                ti = np.linspace(t_min, t_max, N_plot)
+                grid_x, grid_t = np.meshgrid(xi, ti)
+                grid_exact = griddata((x_coord, t_coord), y_exact_vals, (grid_x, grid_t), method='linear')
+                grid_pred = griddata((x_coord, t_coord), pred_final_vals, (grid_x, grid_t), method='linear')
+                print(np.nanmin(y_exact_vals), np.nanmax(y_exact_vals), np.nanstd(y_exact_vals))
+                print(np.nanmin(pred_final_vals), np.nanmax(pred_final_vals), np.nanstd(pred_final_vals))
+                linthresh = 1e-2
+                abs_max = np.nanmax(np.abs(np.concatenate([grid_exact.ravel(), grid_pred.ravel()])))
+                norm = SymLogNorm(linthresh=linthresh, linscale=1.0, vmin=-abs_max, vmax=abs_max, base=10)
+
+                extent = [x_min, x_max, t_min, t_max]
+                im1 = ax_pred.imshow(grid_pred, extent=extent, origin='lower',
+                                     cmap='magma', aspect='auto', norm=norm)
+                ax_pred.set_title(f"Предсказано ({optim})")
+                ax_pred.set_xlabel("x (Пространство)")
+                ax_pred.set_ylabel("t (Время)")
+
+                im2 = ax_exact.imshow(grid_exact, extent=extent, origin='lower',
+                                      cmap='magma', aspect='auto', norm=norm)
+                ax_exact.set_title("Точное решение")
+                ax_exact.set_xlabel("x (Пространство)")
+
+                self.res_figure.subplots_adjust(right=0.85, wspace=0.3)
+                cbar_ax = self.res_figure.add_axes([0.88, 0.15, 0.03, 0.7])
+                self.res_figure.colorbar(im2, cax=cbar_ax, label='Поле u(t,x)')
+            else:
+                ax = self.res_figure.add_subplot(111)
+                ax.text(0.5, 0.5, f"Отрисовка '{dataset_name}' в разработке.", ha='center', va='center')
+
+        except Exception as e:
+            print(f"Ошибка визуализации: {e}")
+
+        self.res_canvas.draw()
+        model.train()
+
     def add_table_row(self, optim, is_batched, use_ema, final_loss, total_time, switch_ep, seed_val, mem_mb):
         row_pos = self.results_table.rowCount()
         self.results_table.insertRow(row_pos)
-
         settings_str = "Batched" if is_batched else "Full"
-        if ("ER" in optim or "Hybrid" in optim) and is_batched and use_ema:
-            settings_str += "+EMA"
-
+        if ("ER" in optim or "Hybrid" in optim) and is_batched and use_ema: settings_str += "+EMA"
         switch_str = f"Эпоха {switch_ep}" if switch_ep != -1 else "-"
-
         self.results_table.setItem(row_pos, 0, QTableWidgetItem(optim))
         self.results_table.setItem(row_pos, 1, QTableWidgetItem(settings_str))
         self.results_table.setItem(row_pos, 2, QTableWidgetItem(f"{final_loss:.4e}"))
