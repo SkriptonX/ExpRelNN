@@ -8,6 +8,7 @@ from PyQt5.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
+
 class LayerConfigDialog(QDialog):
     def __init__(self, current_configs, parent=None):
         super().__init__(parent)
@@ -119,45 +120,50 @@ class MainWindow(QMainWindow):
 
         settings_layout.addWidget(QLabel("Оптимизатор:"))
         self.optim_cb = QComboBox()
-        self.optim_cb.addItems(["ER", "Adam", "SGD", "Hybrid"])
+        self.optim_cb.addItems(["Adam", "SGD", "RMSProp", "L-BFGS", "ER", "Hybrid"])
         self.optim_cb.currentTextChanged.connect(self.toggle_optim_settings)
         settings_layout.addWidget(self.optim_cb)
 
+        self.hybrid_base_label = QLabel("База для Гибрида:")
+        self.hybrid_base_cb = QComboBox()
+        self.hybrid_base_cb.addItems(["Adam", "RMSProp", "SGD", "L-BFGS"])
+        settings_layout.addWidget(self.hybrid_base_label)
+        settings_layout.addWidget(self.hybrid_base_cb)
+
         self.er_method_label = QLabel("Метод ER:")
-        settings_layout.addWidget(self.er_method_label)
         self.er_method_cb = QComboBox()
         self.er_method_cb.addItems(["Spectral", "Recursive", "Lanczos", "Chebyshev", "Kaczmarz"])
         self.er_method_cb.currentTextChanged.connect(self.toggle_optim_settings)
+        settings_layout.addWidget(self.er_method_label)
         settings_layout.addWidget(self.er_method_cb)
 
         self.k_lanczos_label = QLabel("Размер подпространства (Lanczos k):")
-        settings_layout.addWidget(self.k_lanczos_label)
         self.k_lanczos_sb = QSpinBox()
         self.k_lanczos_sb.setRange(2, 50)
         self.k_lanczos_sb.setValue(10)
+        settings_layout.addWidget(self.k_lanczos_label)
         settings_layout.addWidget(self.k_lanczos_sb)
 
         self.chebyshev_k_label = QLabel("Степень полинома (Chebyshev K):")
-        settings_layout.addWidget(self.chebyshev_k_label)
         self.chebyshev_k_sb = QSpinBox()
         self.chebyshev_k_sb.setRange(2, 100)
         self.chebyshev_k_sb.setValue(15)
+        settings_layout.addWidget(self.chebyshev_k_label)
         settings_layout.addWidget(self.chebyshev_k_sb)
 
         self.switch_label = QLabel("Условие переключения:")
-        settings_layout.addWidget(self.switch_label)
         self.switch_cb = QComboBox()
         self.switch_cb.addItems(["Стагнация (Stagnation)", "Спектральный (Cost-Benefit)", "Фиксированная эпоха"])
         self.switch_cb.currentTextChanged.connect(self.toggle_optim_settings)
+        settings_layout.addWidget(self.switch_label)
         settings_layout.addWidget(self.switch_cb)
 
         self.switch_epoch_label = QLabel("Эпоха переключения:")
-        settings_layout.addWidget(self.switch_epoch_label)
         self.switch_epoch_sb = QSpinBox()
         self.switch_epoch_sb.setRange(1, 1000)
         self.switch_epoch_sb.setValue(15)
+        settings_layout.addWidget(self.switch_epoch_label)
         settings_layout.addWidget(self.switch_epoch_sb)
-
 
         settings_layout.addWidget(QLabel("Целевой функционал (Loss):"))
         self.loss_cb = QComboBox()
@@ -181,13 +187,14 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self.batching_cb)
 
         self.batch_label = QLabel("Размер батча:")
-        settings_layout.addWidget(self.batch_label)
         self.batch_sb = QSpinBox()
         self.batch_sb.setRange(16, 300)
         self.batch_sb.setValue(64)
         self.batch_sb.setSingleStep(16)
         self.batch_sb.setEnabled(False)
+        settings_layout.addWidget(self.batch_label)
         settings_layout.addWidget(self.batch_sb)
+
         settings_layout.addSpacing(10)
         settings_layout.addWidget(QLabel("<b>Воспроизводимость</b>"))
 
@@ -207,14 +214,13 @@ class MainWindow(QMainWindow):
         settings_layout.addLayout(seed_layout)
         settings_layout.addSpacing(10)
 
-
         self.ema_cb = QCheckBox("Использовать EMA Гессиана")
         self.ema_cb.setChecked(True)
         settings_layout.addWidget(self.ema_cb)
 
         self.compress_cb = QCheckBox("Сжатие памяти (CSR Pruning)")
         self.compress_cb.setChecked(False)
-        self.compress_cb.setToolTip("Упаковывает матрицы Гессе в разреженный формат CSR (как в Adam)")
+        self.compress_cb.setToolTip("Упаковывает матрицы Гессе в разреженный формат CSR")
         settings_layout.addWidget(self.compress_cb)
 
         settings_layout.addSpacing(10)
@@ -231,7 +237,7 @@ class MainWindow(QMainWindow):
         settings_layout.addSpacing(10)
         settings_layout.addWidget(QLabel("<b>Результаты:</b>"))
 
-        self.toggle_optim_settings(self.optim_cb.currentText())
+        self.toggle_optim_settings()
 
         self.results_table = QTableWidget(0, 7)
         self.results_table.setHorizontalHeaderLabels(["Оптим.", "Режим", "Loss", "Время", "Смена", "Seed", "Память"])
@@ -262,6 +268,7 @@ class MainWindow(QMainWindow):
                 {'units': 128, 'activation': 'Sine'}
             ]
             self.optim_cb.setCurrentText("Hybrid")
+            self.hybrid_base_cb.setCurrentText("Adam")
             self.er_method_cb.setCurrentText("Lanczos")
             self.k_lanczos_sb.setValue(20)
             self.batching_cb.setChecked(False)
@@ -278,6 +285,7 @@ class MainWindow(QMainWindow):
                 {'units': 50, 'activation': 'Tanh'}
             ]
             self.optim_cb.setCurrentText("Hybrid")
+            self.hybrid_base_cb.setCurrentText("L-BFGS")
             self.er_method_cb.setCurrentText("Chebyshev")
             self.chebyshev_k_sb.setValue(30)
             self.batching_cb.setChecked(False)
@@ -296,37 +304,36 @@ class MainWindow(QMainWindow):
 
     def toggle_optim_settings(self, text=None):
         optim = self.optim_cb.currentText()
-        is_er_or_hybrid = optim in ["ER", "Hybrid"]
-        is_hybrid = optim == "Hybrid"
-        current_er = self.er_method_cb.currentText()
+        is_er = (optim == "ER")
+        is_hybrid = (optim == "Hybrid")
+        is_er_family = is_er or is_hybrid
 
+        current_er = self.er_method_cb.currentText()
         is_lanczos = current_er == "Lanczos"
         is_chebyshev = current_er == "Chebyshev"
-        is_fixed = self.switch_cb.currentText() == "Фиксированная эпоха"
 
-        self.er_method_label.setVisible(is_er_or_hybrid)
-        self.er_method_cb.setVisible(is_er_or_hybrid)
+        is_switch_fixed = self.switch_cb.currentText() == "Фиксированная эпоха"
 
-        self.k_lanczos_label.setVisible(is_er_or_hybrid and is_lanczos)
-        self.k_lanczos_sb.setVisible(is_er_or_hybrid and is_lanczos)
+        self.hybrid_base_label.setVisible(is_hybrid)
+        self.hybrid_base_cb.setVisible(is_hybrid)
 
-        self.chebyshev_k_label.setVisible(is_er_or_hybrid and is_chebyshev)
-        self.chebyshev_k_sb.setVisible(is_er_or_hybrid and is_chebyshev)
+        self.er_method_label.setVisible(is_er_family)
+        self.er_method_cb.setVisible(is_er_family)
 
-        self.ema_cb.setEnabled(is_er_or_hybrid)
-        self.compress_cb.setEnabled(is_er_or_hybrid and not (is_lanczos or is_chebyshev))
+        self.k_lanczos_label.setVisible(is_er_family and is_lanczos)
+        self.k_lanczos_sb.setVisible(is_er_family and is_lanczos)
 
-    def toggle_er_settings(self, text):
-        is_er = (text == "ER")
-        self.er_method_label.setVisible(is_er)
-        self.er_method_cb.setVisible(is_er)
-        self.toggle_lanczos_settings(self.er_method_cb.currentText() if is_er else "")
-        self.ema_cb.setEnabled(is_er)
+        self.chebyshev_k_label.setVisible(is_er_family and is_chebyshev)
+        self.chebyshev_k_sb.setVisible(is_er_family and is_chebyshev)
 
-    def toggle_lanczos_settings(self, text):
-        is_lanczos = (text == "Lanczos" and self.optim_cb.currentText() == "ER")
-        self.k_lanczos_label.setVisible(is_lanczos)
-        self.k_lanczos_sb.setVisible(is_lanczos)
+        self.switch_label.setVisible(is_hybrid)
+        self.switch_cb.setVisible(is_hybrid)
+        self.switch_epoch_label.setVisible(is_hybrid and is_switch_fixed)
+        self.switch_epoch_sb.setVisible(is_hybrid and is_switch_fixed)
+
+        self.ema_cb.setVisible(is_er_family)
+        self.compress_cb.setVisible(is_er_family)
+        self.compress_cb.setEnabled(not (is_lanczos or is_chebyshev))
 
     def setup_axes(self):
         self.ax1.set_title("Сходимость: Эпохи / Loss")
@@ -384,6 +391,7 @@ class MainWindow(QMainWindow):
         switch_method = self.switch_cb.currentText()
         switch_epoch = self.switch_epoch_sb.value()
         use_compression = self.compress_cb.isChecked()
+        hybrid_base = self.hybrid_base_cb.currentText()
 
         if self.seed_auto_cb.isChecked():
             current_seed = random.randint(0, 99999999)
@@ -399,9 +407,13 @@ class MainWindow(QMainWindow):
             history = train_network(dataset, optim, self.layer_configs, epochs,
                                     batch_size, use_ema, use_batching, loss_name,
                                     er_method, k_lanczos, switch_method, switch_epoch,
-                                    current_seed, use_compression, chebyshev_k)
+                                    current_seed, use_compression, chebyshev_k, hybrid_base)
             self.plot_results(history, optim, current_seed)
-            self.add_table_row(optim, use_batching, use_ema, history['final_loss'],
+
+            display_optim = f"Hybrid ({hybrid_base} -> ER)" if optim == "Hybrid" else optim
+            if optim == "ER": display_optim = f"ER ({er_method})"
+
+            self.add_table_row(display_optim, use_batching, use_ema, history['final_loss'],
                                history['total_time'], history.get('switch_epoch', -1),
                                current_seed, history['memory_mb'])
             self.run_counter += 1
@@ -444,7 +456,7 @@ class MainWindow(QMainWindow):
         self.results_table.insertRow(row_pos)
 
         settings_str = "Batched" if is_batched else "Full"
-        if optim in ['ER', 'Hybrid'] and is_batched and use_ema:
+        if ("ER" in optim or "Hybrid" in optim) and is_batched and use_ema:
             settings_str += "+EMA"
 
         switch_str = f"Эпоха {switch_ep}" if switch_ep != -1 else "-"

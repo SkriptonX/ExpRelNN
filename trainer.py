@@ -115,7 +115,7 @@ def check_spectral_cost_benefit(model, loss_fn, X, y):
 def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
                   use_ema, use_batching, loss_name, er_method='Spectral', k_lanczos=10,
                   switch_method='Стагнация', switch_epoch=10, seed=42, use_compression=False,
-                  chebyshev_k=15):
+                  chebyshev_k=15, hybrid_base='Adam'):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -156,47 +156,48 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
         loader = [(X, y_target)]
 
     is_hybrid = (optim_name == 'Hybrid')
-    active_optim_name = 'Adam' if is_hybrid else optim_name
+    active_optim_name = hybrid_base if is_hybrid else optim_name
     switched_to_er = False
     switch_epoch_record = -1
 
-    if active_optim_name == 'Adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-    elif active_optim_name == 'SGD':
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
-    else:
-        start_damping = 0.05 if use_batching else 1e-4
-        optimizer = EROptimizer(model, er_method=er_method, h=1.0,
-                                init_damping=start_damping, step_clip=1.0,
-                                use_ema=use_ema, ema_beta=0.9, k_lanczos=k_lanczos,
-                                use_compression=use_compression, chebyshev_k=chebyshev_k)
+    def init_optimizer(name):
+        if name == 'Adam':
+            return torch.optim.Adam(model.parameters(), lr=0.005)
+        elif name == 'SGD':
+            return torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+        elif name == 'RMSProp':
+            return torch.optim.RMSprop(model.parameters(), lr=0.01, alpha=0.99)
+        elif name == 'L-BFGS':
+            return torch.optim.LBFGS(model.parameters(), lr=1.0, max_iter=20,
+                                     history_size=50, line_search_fn="strong_wolfe")
+        else:
+            start_damping = 0.05 if use_batching else 1e-4
+            return EROptimizer(model, er_method=er_method, h=1.0,
+                               init_damping=start_damping, step_clip=1.0,
+                               use_ema=use_ema, ema_beta=0.9, k_lanczos=k_lanczos,
+                               use_compression=use_compression, chebyshev_k=chebyshev_k)
+
+    optimizer = init_optimizer(active_optim_name)
 
     history = {'loss': [], 'time': [], 'cond': {}, 'weight_cond': {}}
     start_time = time.time()
 
     for epoch in range(epochs):
-        if is_hybrid and not switched_to_er and epoch >= 5:
+        if is_hybrid and not switched_to_er:
             do_switch = False
-            if switch_method == 'Фиксированная эпоха':
-                if epoch >= switch_epoch: do_switch = True
-            else:
-                loss_diff = history['loss'][-5] - history['loss'][-1]
-                if loss_diff < 1e-3:
-                    if switch_method == 'Стагнация (Stagnation)':
-                        do_switch = True
-                    elif switch_method == 'Спектральный (Cost-Benefit)':
-                        bx, by = next(iter(loader))
-                        do_switch = check_spectral_cost_benefit(model, loss_fn, bx, by)
+            if switch_method == 'Фиксированная эпоха' and epoch >= switch_epoch:
+                do_switch = True
+            elif switch_method == 'Стагнация' and epoch > 10:
+                recent_losses = history['loss'][-5:]
+                if max(recent_losses) - min(recent_losses) < 1e-5:
+                    do_switch = True
 
             if do_switch:
-                start_damping = 0.05 if use_batching else 1e-4
-                optimizer = EROptimizer(model, er_method=er_method, h=1.0,
-                                        init_damping=start_damping, step_clip=1.0,
-                                        use_ema=use_ema, ema_beta=0.9, k_lanczos=k_lanczos,
-                                        use_compression=use_compression, chebyshev_k=chebyshev_k)
                 active_optim_name = 'ER'
+                optimizer = init_optimizer('ER')
                 switched_to_er = True
                 switch_epoch_record = epoch
+                model.zero_grad()
 
         epoch_loss = 0.0
         epoch_conds = {}
@@ -209,7 +210,7 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
             else:
                 current_loss_fn = loss_fn
 
-            if active_optim_name in ['Adam', 'SGD']:
+            if active_optim_name in ['Adam', 'SGD', 'RMSProp']:
                 model.zero_grad()
                 out = model(bx)
                 loss = current_loss_fn(out, by)
@@ -218,6 +219,19 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
                 optimizer.step()
                 loss_val = loss.item()
                 conds = {}
+
+            elif active_optim_name == 'L-BFGS':
+                def closure():
+                    optimizer.zero_grad()
+                    out = model(bx)
+                    loss = current_loss_fn(out, by)
+                    loss.backward()
+                    return loss
+
+                # Делаем шаг и получаем финальный loss после итераций L-BFGS
+                loss_val = optimizer.step(closure).item()
+                conds = {}
+
             else:
                 loss_val, conds = optimizer.step(current_loss_fn, bx, by)
 
