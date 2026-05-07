@@ -17,9 +17,11 @@ class EROptimizer:
         self.compression_threshold = compression_threshold
 
         self.state = {
-            'hessian_ema': {},
-            'damping': init_damping
+            'damping': {},
+            'momentum_buffer': {},
+            'step': 0
         }
+        self.init_damping = init_damping
 
     def step(self, loss_fn, X, y):
         if not X.requires_grad:
@@ -59,7 +61,13 @@ class EROptimizer:
         updates = {}
         condition_numbers = {}
         expected_decrease = 0.0
-        current_damping = self.state['damping']
+        current_damping = self.state['damping'].get(name, self.init_damping)
+
+        if 'l_max_cache' not in self.state:
+            self.state['l_max_cache'] = {}
+            self.state['step_count'] = 0
+
+        self.state['step_count'] += 1
 
         for name, p in self.model.named_parameters():
             grad_1d = global_grads[name].view(-1)
@@ -82,22 +90,23 @@ class EROptimizer:
                 return calc_hv(v) + current_damping * v
 
             if self.er_method == 'Chebyshev':
-                v_iter = g_val / (torch.norm(g_val) + 1e-8)
-                for _ in range(10):
-                    Hv = calc_hv_damped(v_iter)
-                    l_max_est = torch.abs(torch.dot(v_iter, Hv)).item()
-                    v_iter = Hv / (torch.norm(Hv) + 1e-8)
+                if name not in self.state['l_max_cache'] or self.state['step_count'] % 15 == 1:
+                    v_iter = g_val / (torch.norm(g_val) + 1e-8)
+                    for _ in range(4):
+                        Hv = calc_hv_damped(v_iter)
+                        l_max_est = torch.abs(torch.dot(v_iter, Hv)).item()
+                        v_iter = Hv / (torch.norm(Hv) + 1e-8)
 
-                l_max = l_max_est * 1.2 + 1e-4
+                    self.state['l_max_cache'][name] = l_max_est * 1.2 + 1e-4
+
+                l_max = self.state['l_max_cache'][name]
                 condition_numbers[name] = l_max / current_damping
 
                 K = min(self.chebyshev_k, n)
                 nodes = torch.cos(torch.pi * (torch.arange(K, dtype=p.dtype, device=p.device) + 0.5) / K)
 
                 x_nodes = l_max * nodes
-
                 lam_orig = x_nodes - current_damping
-
                 abs_lam = torch.abs(lam_orig) + current_damping
 
                 f_nodes = (1.0 - torch.exp(-self.h * abs_lam)) / abs_lam
@@ -120,9 +129,11 @@ class EROptimizer:
                     for j in range(2, K):
                         v_next = (2.0 / l_max) * calc_hv_damped(v_k) - v_k_minus_1
                         step += c[j] * v_next
-
                         v_k_minus_1 = v_k
                         v_k = v_next
+                force_factor = 2.0
+                step = step * force_factor
+
                 H_eff = None
 
             elif self.er_method == 'Kaczmarz':
@@ -295,7 +306,10 @@ class EROptimizer:
                     step = self.h * (Phi @ g_val)
                     condition_numbers[name] = norm_G.item() / (current_damping + 1e-8)
 
+            if name not in self.state['damping']:
+                self.state['damping'][name] = self.init_damping
             step_norm = torch.norm(step)
+
             if step_norm > self.step_clip:
                 step = step * (self.step_clip / step_norm)
 
@@ -311,7 +325,13 @@ class EROptimizer:
         with torch.no_grad():
             for name, p in self.model.named_parameters():
                 if name in updates:
-                    p.add_(updates[name])
+                    if name not in self.state['momentum_buffer']:
+                        self.state['momentum_buffer'][name] = torch.zeros_like(p)
+
+                    buf = self.state['momentum_buffer'][name]
+                    buf.mul_(0.9).add_(updates[name])
+
+                    p.add_(buf)
 
         with torch.enable_grad():
             if not X.requires_grad:
@@ -321,27 +341,25 @@ class EROptimizer:
 
         actual_decrease = loss.item() - new_loss
 
-
         if actual_decrease < 0:
             with torch.no_grad():
                 for name, p in self.model.named_parameters():
                     if name in updates:
-                        p.sub_(updates[name])
-
-
-            self.state['damping'] = min(100000.0, self.state['damping'] * 10.0)
+                        p.sub_(self.state['momentum_buffer'][name])
+                        self.state['momentum_buffer'][name].zero_()
+                        self.state['damping'][name] = min(100000.0, self.state['damping'][name] * 4.0)
 
             return loss.item(), condition_numbers
-
 
         if expected_decrease > 1e-8:
             rho = actual_decrease / expected_decrease
         else:
             rho = 0.0
 
-        if rho > 0.75:
-            self.state['damping'] = max(1e-5, self.state['damping'] * 0.5)
-        elif rho < 0.25:
-            self.state['damping'] = min(100000.0, self.state['damping'] * 2.0)
+        for name in updates.keys():
+            if rho > 0.75:
+                self.state['damping'][name] = max(1e-5, self.state['damping'][name] * 0.5)
+            elif rho < 0.25:
+                self.state['damping'][name] = min(100000.0, self.state['damping'][name] * 2.0)
 
         return new_loss, condition_numbers
