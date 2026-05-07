@@ -115,7 +115,7 @@ def check_spectral_cost_benefit(model, loss_fn, X, y):
 def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
                   use_ema, use_batching, loss_name, er_method='Spectral', k_lanczos=10,
                   switch_method='Стагнация', switch_epoch=10, seed=42, use_compression=False,
-                  chebyshev_k=15, hybrid_base='Adam'):
+                  chebyshev_k=15, hybrid_base='Adam', progress_callback=None):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -264,6 +264,9 @@ def train_network(dataset_name, optim_name, layer_configs, epochs, batch_size,
         for k, v in epoch_weight_conds.items():
             if k not in history['weight_cond']: history['weight_cond'][k] = []
             history['weight_cond'][k].append(sum(v) / len(v))
+
+        if progress_callback is not None:
+            progress_callback(epoch + 1, epochs)
 
     history['final_loss'] = history['loss'][-1]
     history['total_time'] = history['time'][-1]

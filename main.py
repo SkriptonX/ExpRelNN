@@ -3,7 +3,8 @@ import random
 from trainer import train_network
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QComboBox, QSpinBox, QPushButton, QMessageBox,
-                             QDialog, QScrollArea, QFrame, QCheckBox, QTableWidgetItem, QTableWidget, QHeaderView)
+                             QDialog, QScrollArea, QFrame, QCheckBox, QTableWidgetItem,
+                             QTableWidget, QHeaderView, QProgressBar)
 from PyQt5.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -230,6 +231,11 @@ class MainWindow(QMainWindow):
         self.run_btn.clicked.connect(self.run_training)
         settings_layout.addWidget(self.run_btn)
 
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setAlignment(Qt.AlignCenter)
+        settings_layout.addWidget(self.progress_bar)
+
         self.clear_btn = QPushButton("Сбросить графики и таблицу")
         self.clear_btn.clicked.connect(self.clear_data)
         settings_layout.addWidget(self.clear_btn)
@@ -401,13 +407,22 @@ class MainWindow(QMainWindow):
 
         self.run_btn.setEnabled(False)
         self.run_btn.setText("Выполнение...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, epochs)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Эпоха %v из %m")
         QApplication.processEvents()
+
+        def update_progress(current_epoch, total_epochs):
+            self.progress_bar.setValue(current_epoch)
+            QApplication.processEvents()
 
         try:
             history = train_network(dataset, optim, self.layer_configs, epochs,
                                     batch_size, use_ema, use_batching, loss_name,
                                     er_method, k_lanczos, switch_method, switch_epoch,
-                                    current_seed, use_compression, chebyshev_k, hybrid_base)
+                                    current_seed, use_compression, chebyshev_k, hybrid_base,
+                                    progress_callback=update_progress)
             self.plot_results(history, optim, current_seed)
 
             display_optim = f"Hybrid ({hybrid_base} -> ER)" if optim == "Hybrid" else optim
@@ -422,6 +437,7 @@ class MainWindow(QMainWindow):
         finally:
             self.run_btn.setEnabled(True)
             self.run_btn.setText("Запустить тест")
+            self.progress_bar.setVisible(False)
 
     def plot_results(self, history, optim, seed_val):
         label_prefix = f"Т{self.run_counter}: {optim} (s:{seed_val})"
