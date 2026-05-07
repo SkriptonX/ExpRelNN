@@ -4,8 +4,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import random
-from model import FlexibleNN, get_dataset
-from optimizer import EROptimizer
+from er_optim.model import FlexibleNN, get_dataset
+from er_optim.optimizer import EROptimizer
 
 
 def get_memory_footprint_mb(model, optimizer):

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from scipy.interpolate import griddata
 from matplotlib.colors import SymLogNorm
-from trainer import train_network
+from er_optim.trainer import train_network
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QComboBox, QSpinBox, QPushButton, QMessageBox,
                              QDialog, QScrollArea, QFrame, QCheckBox, QTableWidgetItem,
@@ -595,7 +595,7 @@ class MainWindow(QMainWindow):
         self.results_table.setItem(row_pos, 6, QTableWidgetItem(f"{mem_mb:.2f} MB"))
 
 
-if __name__ == '__main__':
+def main():
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
